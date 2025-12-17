@@ -1,5 +1,9 @@
 # List of Wodby 2.0 services
 
+https://wodby.com/services
+
+Services are the building blocks of [stacks](http://github.com/wodby/stacks) on Wodby and stacks are blueprints for app deployments.
+
 - [PHP](https://github.com/wodby/service-php)
     - [Drupal PHP](https://github.com/wodby/service-drupal-php)
     - [WordPress PHP](https://github.com/wodby/service-wordpress-php)
@@ -12,7 +16,9 @@
     - [Nginx for Laravel](https://github.com/wodby/service-laravel-nginx)
     - [Nginx for Matomo](https://github.com/wodby/service-matomo-nginx)
 - [Node.js](https://github.com/wodby/service-node)
+- [Next.js](https://github.com/wodby/service-nextjs)
 - [Valkey](https://github.com/wodby/service-valkey)
+- [Redis](https://github.com/wodby/service-redis)
 - [MariaDB](https://github.com/wodby/service-mariadb)
 - [Mailpit](https://github.com/wodby/service-mailpit)
 - [Gotenber](https://github.com/wodby/service-gotenberg)
