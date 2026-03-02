@@ -29,6 +29,8 @@ Services are the building blocks of [stacks](http://github.com/wodby/stacks) on 
 - [OpenSMTPD](https://github.com/wodby/service-opensmtpd)
 - [Varnish](https://github.com/wodby/service-varnish)
 - [NFS Provisioner](https://github.com/wodby/service-nfs-provisioner)
+- [OpenClaw](https://github.com/wodby/service-openclaw)
+- [Tailscale](https://github.com/wodby/service-tailscale)
 - [Cloud MySQL](https://github.com/wodby/service-cloud-mysql)
 - [Cloud MariaDB](https://github.com/wodby/service-cloud-mariadb)
 - [Cloud PostgreSQL](https://github.com/wodby/service-cloud-postgres)
