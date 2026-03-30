@@ -4,6 +4,7 @@ https://wodby.com/services
 
 Services are the building blocks of [stacks](http://github.com/wodby/stacks) on Wodby and stacks are blueprints for app deployments.
 
+- [3X UI](https://github.com/wodby/service-3xui)
 - [PHP](https://github.com/wodby/service-php)
     - [Drupal PHP](https://github.com/wodby/service-drupal-php)
     - [WordPress PHP](https://github.com/wodby/service-wordpress-php)
