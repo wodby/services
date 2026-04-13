@@ -29,6 +29,7 @@ Services are the building blocks of [stacks](http://github.com/wodby/stacks) on 
 - [Solr](https://github.com/wodby/service-solr)
 - [Zookeeper](https://github.com/wodby/service-zookeeper)
 - [PostgreSQL](https://github.com/wodby/service-postgres)
+- [PostGIS](https://github.com/wodby/service-postgis)
 - [Apache HTTPD](https://github.com/wodby/service-httpd)
 - [OpenSMTPD](https://github.com/wodby/service-opensmtpd)
 - [Varnish](https://github.com/wodby/service-varnish)
