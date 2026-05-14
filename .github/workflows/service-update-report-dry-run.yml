@@ -13,9 +13,81 @@ permissions:
   contents: read
 
 jobs:
+  discover-repos:
+    runs-on: ubuntu-latest
+
+    outputs:
+      repos: ${{ steps.discover.outputs.repos }}
+      repo_count: ${{ steps.discover.outputs.repo_count }}
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Build Service Matrix
+        id: discover
+        env:
+          OWNER: wodby
+          REPO_FILTER: ${{ inputs.repo_filter }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          owner = os.environ["OWNER"]
+          repo_filter = os.environ.get("REPO_FILTER", "")
+          readme_text = Path("README.md").read_text()
+
+          pattern = re.compile(rf"https://github.com/{re.escape(owner)}/([^)]+)")
+          repos = sorted(set(pattern.findall(readme_text)))
+
+          if repo_filter:
+              matcher = re.compile(repo_filter)
+              repos = [repo for repo in repos if matcher.search(repo)]
+
+          if not repos:
+              raise SystemExit(f"No README-listed repos matched repo_filter={repo_filter!r}")
+
+          repos_json = json.dumps(repos, separators=(",", ":"))
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
+              fh.write(f"repo_count={len(repos)}\n")
+              fh.write(f"repos={repos_json}\n")
+
+          print(f"Selected {len(repos)} repo(s):")
+          for repo in repos:
+              print(f"- {repo}")
+          PY
+
+      - name: Publish Discovery Summary
+        env:
+          REPOS_JSON: ${{ steps.discover.outputs.repos }}
+          REPO_COUNT: ${{ steps.discover.outputs.repo_count }}
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+
+          repos = json.loads(os.environ["REPOS_JSON"])
+          print("## Dry Run Scope")
+          print("")
+          print(f"- Selected repos: {os.environ['REPO_COUNT']}")
+          for repo in repos:
+              print(f"  - `{repo}`")
+          PY
+
   dry-run-report:
+    name: Dry Run Report / ${{ matrix.repo }}
+    needs: discover-repos
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        repo: ${{ fromJSON(needs.discover-repos.outputs.repos) }}
 
     steps:
       - name: Check Out Repository
@@ -34,43 +106,89 @@ jobs:
           WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
           GITHUB_TOKEN: ${{ github.token }}
           WODBY_GITHUB_TOKEN: ${{ secrets.WODBY_GITHUB_TOKEN }}
+          SERVICE_REPO: ${{ matrix.repo }}
         run: |
           python scripts/service_update_report.py \
             --readme README.md \
             --owner wodby \
-            --repo-filter "${{ inputs.repo_filter }}" \
-            --output-dir artifacts/service-update-report
+            --repo-filter "^${SERVICE_REPO}$" \
+            --output-dir "artifacts/service-update-report/${SERVICE_REPO}"
 
       - name: Upload Report Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: service-update-report
-          path: artifacts/service-update-report
+          name: service-update-report-${{ matrix.repo }}
+          path: artifacts/service-update-report/${{ matrix.repo }}
           if-no-files-found: error
 
       - name: Publish Step Summary
+        env:
+          REPORT_DIR: artifacts/service-update-report/${{ matrix.repo }}
+          SERVICE_REPO: ${{ matrix.repo }}
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
+          import os
           from pathlib import Path
 
-          report = json.loads(Path("artifacts/service-update-report/service-update-report.json").read_text())
-          print("## Dry Run Result")
+          repo = os.environ["SERVICE_REPO"]
+          report_dir = Path(os.environ["REPORT_DIR"])
+          report = json.loads((report_dir / "service-update-report.json").read_text())
+          details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
+
+          print(f"## Dry Run Result: `{repo}`")
           print("")
           print("- No service repos were modified by this workflow.")
-          print(f"- Repos in README: {report['totals']['repos_in_readme']}")
-          print(f"- Repos needing updates: {report['totals']['updates']}")
-          print(f"- Fully comparable repos with no changes: {report['totals']['no_changes']}")
-          print(f"- Special-case repos: {report['totals']['special']}")
+          print("- Scope: single service repo")
+          print(f"- Artifact: `service-update-report-{repo}`")
           print("")
-          if report["updates"]:
-            print("### Update Candidates")
-            for repo, messages in sorted(report["updates"].items()):
-              print(f"- `{repo}`")
-              for message in messages:
-                print(f"  - {message}")
+
+          if repo in report["missing_service_yml"]:
+              print("- Status: missing `service.yml`")
+          elif details and details["updates"]:
+              print("- Status: update candidate")
+          elif details and (details["warnings"] or not details["has_image"] or not details["has_helm"] or not details["has_options"]):
+              print("- Status: special case")
           else:
-            print("No update candidates were found.")
+              print("- Status: no changes")
           print("")
-          print("The full markdown and JSON reports are attached as the `service-update-report` artifact.")
+
+          if details and details["updates"]:
+              print("### Updates Needed")
+              for message in details["updates"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details["current"]:
+              print("### Current State")
+              for message in details["current"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details["warnings"]:
+              print("### Warnings")
+              for message in details["warnings"]:
+                  print(f"- {message}")
+              print("")
+
+          if repo in report["missing_service_yml"]:
+              print("### Missing or Unreadable `service.yml`")
+              print(f"- `{repo}`")
+              print("")
+
+          if details and (not details["has_image"] or not details["has_helm"] or not details["has_options"]):
+              print("### Missing Comparison Inputs")
+              if not details["has_image"]:
+                  print("- No `containers[0].image`")
+              if not details["has_helm"]:
+                  print("- No `helm`")
+              if not details["has_options"]:
+                  print("- No `options`")
+              print("")
+
+          if not report["updates"] and not (details and details["warnings"]) and repo not in report["missing_service_yml"]:
+              print("No update candidates were found.")
+              print("")
+
+          print("The full markdown and JSON reports are attached as the per-service artifact.")
           PY
