@@ -82,6 +82,9 @@ jobs:
     needs: discover-repos
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SERVICE_REPO: ${{ matrix.repo }}
+      REPORT_DIR: ${{ runner.temp }}/service-update-report/${{ matrix.repo }}
 
     strategy:
       fail-fast: false
@@ -106,25 +109,24 @@ jobs:
           WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
           GITHUB_TOKEN: ${{ github.token }}
           WODBY_GITHUB_TOKEN: ${{ secrets.WODBY_GITHUB_TOKEN }}
-          SERVICE_REPO: ${{ matrix.repo }}
         run: |
           python scripts/service_update_report.py \
             --readme README.md \
             --owner wodby \
             --repo-filter "^${SERVICE_REPO}$" \
-            --output-dir "artifacts/service-update-report/${SERVICE_REPO}"
+            --output-dir "${REPORT_DIR}"
 
-      - name: Upload Report Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: service-update-report-${{ matrix.repo }}
-          path: artifacts/service-update-report/${{ matrix.repo }}
-          if-no-files-found: error
+      - name: Print Full Report
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REPORT_DIR"]) / "service-update-report.md"
+          print(report_path.read_text())
+          PY
 
       - name: Publish Step Summary
-        env:
-          REPORT_DIR: artifacts/service-update-report/${{ matrix.repo }}
-          SERVICE_REPO: ${{ matrix.repo }}
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
@@ -140,7 +142,7 @@ jobs:
           print("")
           print("- No service repos were modified by this workflow.")
           print("- Scope: single service repo")
-          print(f"- Artifact: `service-update-report-{repo}`")
+          print("- Full report: printed in the `Print Full Report` step log")
           print("")
 
           if repo in report["missing_service_yml"]:
@@ -190,5 +192,5 @@ jobs:
               print("No update candidates were found.")
               print("")
 
-          print("The full markdown and JSON reports are attached as the per-service artifact.")
+          print("The full markdown report is printed in the job log above.")
           PY
