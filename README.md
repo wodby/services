@@ -45,7 +45,6 @@ Services are the building blocks of [stacks](http://github.com/wodby/stacks) on 
 - [Cloud MariaDB](https://github.com/wodby/service-cloud-mariadb)
 - [Cloud PostgreSQL](https://github.com/wodby/service-cloud-postgres)
 - [FRPC](https://github.com/wodby/service-frpc)
-- [Ingress Nginx](https://github.com/wodby/service-ingress-nginx)
 - [Envoy Gateway](https://github.com/wodby/service-envoy-gateway)
 - [Metrics Server](https://github.com/wodby/service-metrics-server)
 - [Node Exporter](https://github.com/wodby/service-node-exporter)
