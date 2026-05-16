@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import copy
 import json
 import os
 import re
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 import yaml
@@ -70,6 +72,12 @@ class RepoResult:
     has_image: bool
     has_helm: bool
     has_options: bool
+    expects_image: bool
+    expects_helm: bool
+    expects_options: bool
+    comparable: bool
+    external: bool
+    service_type: str
     updates: list[str]
     current: list[str]
     warnings: list[str]
@@ -80,6 +88,12 @@ class RepoResult:
             "has_image": self.has_image,
             "has_helm": self.has_helm,
             "has_options": self.has_options,
+            "expects_image": self.expects_image,
+            "expects_helm": self.expects_helm,
+            "expects_options": self.expects_options,
+            "comparable": self.comparable,
+            "external": self.external,
+            "service_type": self.service_type,
             "updates": self.updates,
             "current": self.current,
             "warnings": self.warnings,
@@ -105,6 +119,8 @@ class UpdateReportGenerator:
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
+        self._service_data_cache: dict[str, dict[str, Any] | None] = {}
+        self._resolved_service_cache: dict[str, dict[str, Any] | None] = {}
         self._wodby_chart_cache: dict[str, str] = {}
 
     def git_ls_remote(self, *args: str) -> str:
@@ -151,6 +167,96 @@ class UpdateReportGenerator:
         content = base64.b64decode(payload["content"]).decode("utf-8")
         self._content_cache[cache_key] = content
         return content
+
+    def get_service_data(self, repo: str) -> dict[str, Any] | None:
+        if repo in self._service_data_cache:
+            return self._service_data_cache[repo]
+
+        service_text = self.get_repo_file(repo, "service.yml")
+        if service_text is None:
+            self._service_data_cache[repo] = None
+            return None
+
+        service_data = yaml.safe_load(service_text) or {}
+        if not isinstance(service_data, dict):
+            raise RuntimeError(f"{repo} service.yml did not decode to a mapping")
+
+        self._service_data_cache[repo] = service_data
+        return service_data
+
+    @staticmethod
+    def service_name_to_repo(service_name: str) -> str:
+        if service_name.startswith("service-"):
+            return service_name
+        return f"service-{service_name}"
+
+    @staticmethod
+    def _is_named_object_list(items: list[Any]) -> bool:
+        return bool(items) and all(isinstance(item, dict) and "name" in item for item in items)
+
+    def merge_values(self, base: Any, override: Any) -> Any:
+        if base is None:
+            return copy.deepcopy(override)
+        if override is None:
+            return copy.deepcopy(base)
+
+        if isinstance(base, dict) and isinstance(override, dict):
+            result = copy.deepcopy(base)
+            for key, value in override.items():
+                if key == "from":
+                    continue
+                if key in result:
+                    result[key] = self.merge_values(result[key], value)
+                else:
+                    result[key] = copy.deepcopy(value)
+            return result
+
+        if isinstance(base, list) and isinstance(override, list):
+            if self._is_named_object_list(base + override):
+                merged = [copy.deepcopy(item) for item in base]
+                index_by_name = {
+                    item["name"]: position
+                    for position, item in enumerate(merged)
+                    if isinstance(item, dict) and "name" in item
+                }
+                for item in override:
+                    name = item["name"]
+                    if name in index_by_name:
+                        merged[index_by_name[name]] = self.merge_values(merged[index_by_name[name]], item)
+                    else:
+                        index_by_name[name] = len(merged)
+                        merged.append(copy.deepcopy(item))
+                return merged
+            return copy.deepcopy(override)
+
+        return copy.deepcopy(override)
+
+    def get_resolved_service_data(self, repo: str, chain: tuple[str, ...] = ()) -> dict[str, Any] | None:
+        if repo in self._resolved_service_cache:
+            return self._resolved_service_cache[repo]
+
+        if repo in chain:
+            cycle = " -> ".join(chain + (repo,))
+            raise RuntimeError(f"detected inheritance cycle: {cycle}")
+
+        service_data = self.get_service_data(repo)
+        if service_data is None:
+            self._resolved_service_cache[repo] = None
+            return None
+
+        parent_name = service_data.get("from")
+        if not parent_name:
+            resolved = copy.deepcopy(service_data)
+        else:
+            parent_repo = self.service_name_to_repo(str(parent_name))
+            parent_data = self.get_resolved_service_data(parent_repo, chain + (repo,))
+            if parent_data is None:
+                raise RuntimeError(f"unable to resolve inherited service `{parent_repo}` for `{repo}`")
+            resolved = self.merge_values(parent_data, service_data)
+            resolved["from"] = parent_name
+
+        self._resolved_service_cache[repo] = resolved
+        return resolved
 
     def get_github_tags(self, owner: str, repo: str) -> set[str]:
         cache_key = (owner, repo)
@@ -222,6 +328,34 @@ class UpdateReportGenerator:
             return self.get_dockerhub_tags(image)
         raise RuntimeError(f"unsupported image registry for {image}")
 
+    def get_oci_tags(self, reference: str) -> list[str]:
+        parsed = urlparse(reference)
+        if parsed.scheme != "oci":
+            raise RuntimeError(f"unsupported OCI reference {reference}")
+
+        registry = parsed.netloc
+        repo = parsed.path.lstrip("/")
+        if not repo:
+            raise RuntimeError(f"unable to determine OCI repository for {reference}")
+
+        if registry in ("docker.io", "registry-1.docker.io", "index.docker.io"):
+            return self.get_dockerhub_tags(repo)
+        if registry == "ghcr.io":
+            return self.get_ghcr_tags(repo)
+        raise RuntimeError(f"unsupported OCI registry for {reference}")
+
+    def latest_stable_version_tag(self, published_tags: list[str]) -> str | None:
+        candidates: list[tuple[Version, str]] = []
+        for tag in published_tags:
+            parsed = parse_version(tag)
+            if parsed is None or parsed.is_prerelease:
+                continue
+            candidates.append((parsed, tag))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
     def get_helm_latest(self, source: str, chart: str) -> str | None:
         if source.startswith("oci://registry-1.docker.io/wodby/"):
             chart_name = chart.rsplit("/", 1)[-1]
@@ -230,6 +364,10 @@ class UpdateReportGenerator:
                 payload = yaml.safe_load(self.fetch(url).text)
                 self._wodby_chart_cache[chart_name] = str(payload["version"])
             return self._wodby_chart_cache[chart_name]
+
+        if source.startswith("oci://"):
+            reference = chart if chart.startswith("oci://") else source
+            return self.latest_stable_version_tag(self.get_oci_tags(reference))
 
         if source not in self._helm_index_cache:
             index_url = f"{source.rstrip('/')}/index.yaml"
@@ -300,6 +438,33 @@ class UpdateReportGenerator:
             tied.sort(key=lambda item: (item[1], item[2]), reverse=True)
         return tied[0][2]
 
+    @staticmethod
+    def get_service_images(service_data: dict[str, Any]) -> list[str]:
+        primary_images: list[str] = []
+        all_images: list[str] = []
+
+        for workload in service_data.get("workloads") or []:
+            if not isinstance(workload, dict):
+                continue
+            workload_images = [
+                container["image"]
+                for container in workload.get("containers") or []
+                if isinstance(container, dict) and container.get("image")
+            ]
+            if workload.get("primary"):
+                primary_images.extend(workload_images)
+            all_images.extend(workload_images)
+
+        ordered = primary_images + all_images
+        unique_images: list[str] = []
+        seen: set[str] = set()
+        for image in ordered:
+            if image in seen:
+                continue
+            seen.add(image)
+            unique_images.append(image)
+        return unique_images
+
 
 def load_service_repos(readme_path: Path, owner: str, repo_filter: str) -> list[str]:
     pattern = re.compile(rf"{re.escape(README_REPO_TEMPLATE.format(owner=owner))}([^)]+)")
@@ -322,32 +487,53 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     no_options: list[str] = []
 
     for repo in repos:
-        service_text = generator.get_repo_file(repo, "service.yml")
-        if service_text is None:
+        raw_service_data = generator.get_service_data(repo)
+        if raw_service_data is None:
             missing_service_yml.append(repo)
             continue
 
-        service_data = yaml.safe_load(service_text) or {}
-        containers = service_data.get("containers") or []
-        image = containers[0].get("image") if containers and isinstance(containers[0], dict) else None
+        warnings: list[str] = []
+        try:
+            service_data = generator.get_resolved_service_data(repo)
+        except Exception as exc:
+            warnings.append(f"inheritance resolution failed: {exc}")
+            service_data = copy.deepcopy(raw_service_data)
+
+        if service_data is None:
+            missing_service_yml.append(repo)
+            continue
+
+        service_type = str(service_data.get("type") or raw_service_data.get("type") or "")
+        external = bool(service_data.get("external"))
+        images = generator.get_service_images(service_data)
+        image = images[0] if images else None
         options = service_data.get("options") or []
         helm = service_data.get("helm") or None
         helm_source = helm.get("source") if helm else None
         helm_chart = (helm.get("chart") or helm_source) if helm else None
         helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
+        expects_image = not external and service_type != "infrastructure"
+        expects_helm = not external
+        expects_options = not external and service_type != "infrastructure"
 
-        if not image:
+        if expects_image and not image:
             no_image.append(repo)
-        if not helm:
+        if expects_helm and not helm:
             no_helm.append(repo)
-        if not options:
+        if expects_options and not options:
             no_options.append(repo)
 
         updates: list[str] = []
         current: list[str] = []
-        warnings: list[str] = []
+        comparable = False
+
+        if len(images) > 1:
+            warnings.append(
+                f"multiple explicit container images were found in workloads; comparing only the first one `{image}`"
+            )
 
         if image and options:
+            comparable = True
             try:
                 published_tags = generator.get_image_tags(image)
                 valid_stabilities = None
@@ -361,7 +547,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             if published_tags is not None:
                 for option in options:
                     wanted = str(option.get("version"))
-                    configured = option.get("tag")
+                    configured = option.get("tag") or wanted
                     configured_exists = configured in published_tags if configured else False
                     if image.startswith(f"{args.owner}/"):
                         target = generator.latest_wodby_tag(wanted, published_tags, valid_stabilities or set())
@@ -377,16 +563,22 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                             warnings.append(
                                 f"no published image tag found for version `{wanted}` (current: `{configured}`)"
                             )
-                    elif not configured:
-                        updates.append(f"a new tag will be added `{target}` for version `{wanted}`")
                     elif configured == target:
                         current.append(f"tag `{configured}` is the latest published tag for version `{wanted}`")
                     else:
                         updates.append(f"updating tag to `{target}` for version `{wanted}` (current: `{configured}`)")
         elif image and not options:
-            current.append(f"image `{image}` is defined, but there are no `options` entries to compare against published tags")
+            if expects_options:
+                warnings.append(
+                    f"explicit image `{image}` is defined, but there are no resolved `options` entries to compare against published tags"
+                )
+        elif options and expects_image:
+            warnings.append("service options are defined, but no explicit container image was found in resolved workloads")
+        elif external:
+            current.append("external service is managed outside Wodby; automated image and Helm version checks are not available")
 
         if helm and helm_source and helm_chart and helm_version:
+            comparable = True
             try:
                 latest_chart = generator.get_helm_latest(helm_source, helm_chart)
                 if latest_chart is None:
@@ -397,6 +589,14 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     updates.append(f"a new chart version is available `{latest_chart}` (current: `{helm_version}`)")
             except Exception as exc:
                 warnings.append(f"helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
+        elif expects_helm:
+            if not helm:
+                warnings.append("no resolved `helm` section was found for this non-external service")
+            else:
+                warnings.append("resolved `helm` section is incomplete and cannot be compared automatically")
+
+        if not comparable and not warnings and not external:
+            current.append("no automated version comparison target is defined in the resolved service manifest")
 
         results.append(
             RepoResult(
@@ -404,6 +604,12 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 has_image=bool(image),
                 has_helm=bool(helm),
                 has_options=bool(options),
+                expects_image=expects_image,
+                expects_helm=expects_helm,
+                expects_options=expects_options,
+                comparable=comparable,
+                external=external,
+                service_type=service_type,
                 updates=updates,
                 current=current,
                 warnings=warnings,
@@ -417,9 +623,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         if not result.updates
         and not result.warnings
         and result.current
-        and result.has_image
-        and result.has_helm
-        and result.has_options
+        and result.comparable
     ]
     comparable_no_updates = {result.repo for result in updates_section + no_changes_section}
     special_section = [result for result in results if result.repo not in comparable_no_updates]
@@ -489,17 +693,20 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- {repo}")
     lines.append("")
 
-    lines.append("### Repos Missing `image`, `helm`, or `options`")
+    lines.append("### Repos Requiring Manual Review")
     for repo in sorted(report["special"]):
         details = report["special"][repo]
         flags: list[str] = []
-        if not details["has_image"]:
-            flags.append("no image")
-        if not details["has_helm"]:
-            flags.append("no helm")
-        if not details["has_options"]:
-            flags.append("no options")
-        lines.append(f"- {repo}: {', '.join(flags)}")
+        if details.get("expects_image") and not details["has_image"]:
+            flags.append("no explicit image comparison target")
+        if details.get("expects_helm") and not details["has_helm"]:
+            flags.append("no resolved helm configuration")
+        if details.get("expects_options") and not details["has_options"]:
+            flags.append("no resolved options")
+        if flags:
+            lines.append(f"- {repo}: {', '.join(flags)}")
+        else:
+            lines.append(f"- {repo}")
         for message in details["current"]:
             lines.append(f"  current: {message}")
         for message in details["warnings"]:
@@ -511,9 +718,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         "- `Missing or unreadable service.yml` can mean the file does not exist in the repo or the workflow token does not have enough read access."
     )
     category_lists = report["category_lists"]
-    lines.append(f"- No `containers[0].image`: {', '.join(category_lists['no_image']) if category_lists['no_image'] else 'none'}")
-    lines.append(f"- No `helm`: {', '.join(category_lists['no_helm']) if category_lists['no_helm'] else 'none'}")
-    lines.append(f"- No `options`: {', '.join(category_lists['no_options']) if category_lists['no_options'] else 'none'}")
+    lines.append(
+        f"- No explicit image comparison target: {', '.join(category_lists['no_image']) if category_lists['no_image'] else 'none'}"
+    )
+    lines.append(
+        f"- No resolved `helm`: {', '.join(category_lists['no_helm']) if category_lists['no_helm'] else 'none'}"
+    )
+    lines.append(
+        f"- No resolved `options`: {', '.join(category_lists['no_options']) if category_lists['no_options'] else 'none'}"
+    )
     return "\n".join(lines) + "\n"
 
 

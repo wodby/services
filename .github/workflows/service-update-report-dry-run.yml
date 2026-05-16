@@ -150,7 +150,13 @@ jobs:
               print("- Status: missing `service.yml`")
           elif details and details["updates"]:
               print("- Status: update candidate")
-          elif details and (details["warnings"] or not details["has_image"] or not details["has_helm"] or not details["has_options"]):
+          elif details and (
+              details["warnings"]
+              or not details.get("comparable", False)
+              or (details.get("expects_image") and not details["has_image"])
+              or (details.get("expects_helm") and not details["has_helm"])
+              or (details.get("expects_options") and not details["has_options"])
+          ):
               print("- Status: special case")
           else:
               print("- Status: no changes")
@@ -179,17 +185,27 @@ jobs:
               print(f"- `{repo}`")
               print("")
 
-          if details and (not details["has_image"] or not details["has_helm"] or not details["has_options"]):
+          if details and (
+              (details.get("expects_image") and not details["has_image"])
+              or (details.get("expects_helm") and not details["has_helm"])
+              or (details.get("expects_options") and not details["has_options"])
+          ):
               print("### Missing Comparison Inputs")
-              if not details["has_image"]:
-                  print("- No `containers[0].image`")
-              if not details["has_helm"]:
-                  print("- No `helm`")
-              if not details["has_options"]:
-                  print("- No `options`")
+              if details.get("expects_image") and not details["has_image"]:
+                  print("- No explicit image comparison target")
+              if details.get("expects_helm") and not details["has_helm"]:
+                  print("- No resolved `helm`")
+              if details.get("expects_options") and not details["has_options"]:
+                  print("- No resolved `options`")
               print("")
 
-          if not report["updates"] and not (details and details["warnings"]) and repo not in report["missing_service_yml"]:
+          if (
+              details
+              and details.get("comparable")
+              and not report["updates"]
+              and not details["warnings"]
+              and repo not in report["missing_service_yml"]
+          ):
               print("No update candidates were found.")
               print("")
 
