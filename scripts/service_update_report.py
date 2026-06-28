@@ -18,7 +18,8 @@ import yaml
 from packaging.version import InvalidVersion, Version
 
 
-README_REPO_TEMPLATE = "https://github.com/{owner}/"
+README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
+README_MANAGED_SERVICES_HEADING = "## Managed services"
 DOCKER_TOKEN_URL = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
 DOCKER_TAGS_URL = "https://registry-1.docker.io/v2/{repo}/tags/list?n=10000"
 GHCR_TOKEN_URL = "https://ghcr.io/token?scope=repository:{repo}:pull"
@@ -119,8 +120,8 @@ class UpdateReportGenerator:
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
-        self._service_data_cache: dict[str, dict[str, Any] | None] = {}
-        self._resolved_service_cache: dict[str, dict[str, Any] | None] = {}
+        self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self._resolved_service_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._wodby_chart_cache: dict[str, str] = {}
 
     def git_ls_remote(self, *args: str) -> str:
@@ -168,21 +169,43 @@ class UpdateReportGenerator:
         self._content_cache[cache_key] = content
         return content
 
-    def get_service_data(self, repo: str) -> dict[str, Any] | None:
-        if repo in self._service_data_cache:
-            return self._service_data_cache[repo]
+    def get_service_data(self, repo: str, manifest_path: str = "service.yml") -> dict[str, Any] | None:
+        cache_key = (repo, manifest_path)
+        if cache_key in self._service_data_cache:
+            return self._service_data_cache[cache_key]
 
-        service_text = self.get_repo_file(repo, "service.yml")
+        service_text = self.get_repo_file(repo, manifest_path)
         if service_text is None:
-            self._service_data_cache[repo] = None
+            self._service_data_cache[cache_key] = None
             return None
 
         service_data = yaml.safe_load(service_text) or {}
         if not isinstance(service_data, dict):
-            raise RuntimeError(f"{repo} service.yml did not decode to a mapping")
+            raise RuntimeError(f"{repo} {manifest_path} did not decode to a mapping")
 
-        self._service_data_cache[repo] = service_data
+        self._service_data_cache[cache_key] = service_data
         return service_data
+
+    def get_repo_manifest_paths(self, repo: str) -> list[str]:
+        root_manifest = self.get_service_data(repo, "service.yml")
+        if root_manifest is not None:
+            return ["service.yml"]
+
+        index_text = self.get_repo_file(repo, "index.yml")
+        if index_text is None:
+            return []
+
+        index_data = yaml.safe_load(index_text) or {}
+        if not isinstance(index_data, dict):
+            raise RuntimeError(f"{repo} index.yml did not decode to a mapping")
+
+        paths = []
+        for service_path in index_data.get("services") or []:
+            service_dir = str(service_path).strip().strip("/")
+            if not service_dir:
+                continue
+            paths.append(f"{service_dir}/service.yml")
+        return paths
 
     @staticmethod
     def service_name_to_repo(service_name: str) -> str:
@@ -231,17 +254,23 @@ class UpdateReportGenerator:
 
         return copy.deepcopy(override)
 
-    def get_resolved_service_data(self, repo: str, chain: tuple[str, ...] = ()) -> dict[str, Any] | None:
-        if repo in self._resolved_service_cache:
-            return self._resolved_service_cache[repo]
+    def get_resolved_service_data(
+        self,
+        repo: str,
+        manifest_path: str = "service.yml",
+        chain: tuple[tuple[str, str], ...] = (),
+    ) -> dict[str, Any] | None:
+        cache_key = (repo, manifest_path)
+        if cache_key in self._resolved_service_cache:
+            return self._resolved_service_cache[cache_key]
 
-        if repo in chain:
-            cycle = " -> ".join(chain + (repo,))
+        if cache_key in chain:
+            cycle = " -> ".join(f"{repo_name}:{path}" for repo_name, path in chain + (cache_key,))
             raise RuntimeError(f"detected inheritance cycle: {cycle}")
 
-        service_data = self.get_service_data(repo)
+        service_data = self.get_service_data(repo, manifest_path)
         if service_data is None:
-            self._resolved_service_cache[repo] = None
+            self._resolved_service_cache[cache_key] = None
             return None
 
         parent_name = service_data.get("from")
@@ -249,13 +278,13 @@ class UpdateReportGenerator:
             resolved = copy.deepcopy(service_data)
         else:
             parent_repo = self.service_name_to_repo(str(parent_name))
-            parent_data = self.get_resolved_service_data(parent_repo, chain + (repo,))
+            parent_data = self.get_resolved_service_data(parent_repo, "service.yml", chain + (cache_key,))
             if parent_data is None:
                 raise RuntimeError(f"unable to resolve inherited service `{parent_repo}` for `{repo}`")
             resolved = self.merge_values(parent_data, service_data)
             resolved["from"] = parent_name
 
-        self._resolved_service_cache[repo] = resolved
+        self._resolved_service_cache[cache_key] = resolved
         return resolved
 
     def get_github_tags(self, owner: str, repo: str) -> set[str]:
@@ -466,9 +495,30 @@ class UpdateReportGenerator:
         return unique_images
 
 
+def readme_managed_services_table_text(readme_text: str) -> str:
+    lines = readme_text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip().lower() == README_MANAGED_SERVICES_HEADING.lower():
+            start = index + 1
+            break
+    if start is None:
+        return ""
+
+    section_lines = []
+    for line in lines[start:]:
+        if line.startswith("## "):
+            break
+        if line.lstrip().startswith("|"):
+            section_lines.append(line)
+    return "\n".join(section_lines)
+
+
 def load_service_repos(readme_path: Path, owner: str, repo_filter: str) -> list[str]:
-    pattern = re.compile(rf"{re.escape(README_REPO_TEMPLATE.format(owner=owner))}([^)]+)")
-    repos = sorted(set(pattern.findall(readme_path.read_text())))
+    readme_text = readme_path.read_text()
+    repo_source_text = readme_managed_services_table_text(readme_text) or readme_text
+    pattern = re.compile(README_SERVICE_REPO_RE_TEMPLATE.format(owner=re.escape(owner)), re.IGNORECASE)
+    repos = sorted(set(pattern.findall(repo_source_text)))
     if not repo_filter:
         return repos
     matcher = re.compile(repo_filter)
@@ -487,129 +537,170 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     no_options: list[str] = []
 
     for repo in repos:
-        raw_service_data = generator.get_service_data(repo)
-        if raw_service_data is None:
+        manifest_paths = generator.get_repo_manifest_paths(repo)
+        if not manifest_paths:
             missing_service_yml.append(repo)
             continue
-
-        warnings: list[str] = []
-        try:
-            service_data = generator.get_resolved_service_data(repo)
-        except Exception as exc:
-            warnings.append(f"inheritance resolution failed: {exc}")
-            service_data = copy.deepcopy(raw_service_data)
-
-        if service_data is None:
-            missing_service_yml.append(repo)
-            continue
-
-        service_type = str(service_data.get("type") or raw_service_data.get("type") or "")
-        external = bool(service_data.get("external"))
-        images = generator.get_service_images(service_data)
-        image = images[0] if images else None
-        options = service_data.get("options") or []
-        helm = service_data.get("helm") or None
-        helm_source = helm.get("source") if helm else None
-        helm_chart = (helm.get("chart") or helm_source) if helm else None
-        helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
-        expects_image = not external and service_type != "infrastructure"
-        expects_helm = not external
-        expects_options = not external and service_type != "infrastructure"
-
-        if expects_image and not image:
-            no_image.append(repo)
-        if expects_helm and not helm:
-            no_helm.append(repo)
-        if expects_options and not options:
-            no_options.append(repo)
 
         updates: list[str] = []
         current: list[str] = []
-        comparable = False
+        warnings: list[str] = []
+        repo_expects_image = False
+        repo_expects_helm = False
+        repo_expects_options = False
+        repo_missing_expected_image = False
+        repo_missing_expected_helm = False
+        repo_missing_expected_options = False
+        repo_comparable = True
+        repo_external = True
+        repo_service_types: set[str] = set()
 
-        if len(images) > 1:
-            warnings.append(
-                f"multiple explicit container images were found in workloads; comparing only the first one `{image}`"
-            )
+        multiple_manifests = len(manifest_paths) > 1
 
-        if image and options:
-            comparable = True
+        for manifest_path in manifest_paths:
+            raw_service_data = generator.get_service_data(repo, manifest_path)
+            if raw_service_data is None:
+                warnings.append(f"[{manifest_path}] manifest listed by index.yml could not be read")
+                repo_comparable = False
+                continue
+
             try:
-                published_tags = generator.get_image_tags(image)
-                valid_stabilities = None
-                if image.startswith(f"{args.owner}/"):
-                    valid_stabilities = generator.get_github_tags(args.owner, image.split("/", 1)[1])
+                service_data = generator.get_resolved_service_data(repo, manifest_path)
             except Exception as exc:
-                warnings.append(f"image lookup failed for `{image}`: {exc}")
-                published_tags = None
-                valid_stabilities = None
+                warnings.append(f"[{manifest_path}] inheritance resolution failed: {exc}")
+                service_data = copy.deepcopy(raw_service_data)
 
-            if published_tags is not None:
-                for option in options:
-                    wanted = str(option.get("version"))
-                    configured = option.get("tag") or wanted
-                    configured_exists = configured in published_tags if configured else False
-                    if image.startswith(f"{args.owner}/"):
-                        target = generator.latest_wodby_tag(wanted, published_tags, valid_stabilities or set())
-                    else:
-                        target = generator.latest_external_tag(wanted, published_tags, configured)
+            if service_data is None:
+                warnings.append(f"[{manifest_path}] resolved service manifest is empty")
+                repo_comparable = False
+                continue
 
-                    if target is None:
-                        if configured and configured_exists:
-                            current.append(
-                                f"no newer published image tag family was found for version `{wanted}`; current tag `{configured}` exists"
-                            )
-                        else:
-                            warnings.append(
-                                f"no published image tag found for version `{wanted}` (current: `{configured}`)"
-                            )
-                    elif configured == target:
-                        current.append(f"tag `{configured}` is the latest published tag for version `{wanted}`")
-                    else:
-                        updates.append(f"updating tag to `{target}` for version `{wanted}` (current: `{configured}`)")
-        elif image and not options:
-            if expects_options:
+            service_type = str(service_data.get("type") or raw_service_data.get("type") or "")
+            external = bool(service_data.get("external"))
+            images = generator.get_service_images(service_data)
+            image = images[0] if images else None
+            options = service_data.get("options") or []
+            helm = service_data.get("helm") or None
+            helm_source = helm.get("source") if helm else None
+            helm_chart = (helm.get("chart") or helm_source) if helm else None
+            helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
+            expects_image = not external and service_type != "infrastructure"
+            expects_helm = not external
+            expects_options = not external and service_type != "infrastructure"
+            comparable = False
+
+            repo_service_types.add(service_type)
+            repo_external = repo_external and external
+            repo_expects_image = repo_expects_image or expects_image
+            repo_expects_helm = repo_expects_helm or expects_helm
+            repo_expects_options = repo_expects_options or expects_options
+            repo_missing_expected_image = repo_missing_expected_image or (expects_image and not image)
+            repo_missing_expected_helm = repo_missing_expected_helm or (expects_helm and not helm)
+            repo_missing_expected_options = repo_missing_expected_options or (expects_options and not options)
+
+            label = str(raw_service_data.get("name") or service_data.get("name") or manifest_path.rsplit("/", 1)[0])
+            prefix = f"[{label}] " if multiple_manifests else ""
+
+            if len(images) > 1:
                 warnings.append(
-                    f"explicit image `{image}` is defined, but there are no resolved `options` entries to compare against published tags"
+                    f"{prefix}multiple explicit container images were found in workloads; comparing only the first one `{image}`"
                 )
-        elif options and expects_image:
-            warnings.append("service options are defined, but no explicit container image was found in resolved workloads")
-        elif external:
-            current.append("external service is managed outside Wodby; automated image and Helm version checks are not available")
 
-        if helm and helm_source and helm_chart and helm_version:
-            comparable = True
-            try:
-                latest_chart = generator.get_helm_latest(helm_source, helm_chart)
-                if latest_chart is None:
-                    warnings.append(f"could not resolve latest Helm chart version for `{helm_chart}` from `{helm_source}`")
-                elif latest_chart == helm_version:
-                    current.append(f"helm chart latest version is current (`{helm_version}`)")
+            if image and options:
+                comparable = True
+                try:
+                    published_tags = generator.get_image_tags(image)
+                    valid_stabilities = None
+                    if image.startswith(f"{args.owner}/"):
+                        valid_stabilities = generator.get_github_tags(args.owner, image.split("/", 1)[1])
+                except Exception as exc:
+                    warnings.append(f"{prefix}image lookup failed for `{image}`: {exc}")
+                    published_tags = None
+                    valid_stabilities = None
+
+                if published_tags is not None:
+                    for option in options:
+                        wanted = str(option.get("version"))
+                        configured = option.get("tag") or wanted
+                        configured_exists = configured in published_tags if configured else False
+                        if image.startswith(f"{args.owner}/"):
+                            target = generator.latest_wodby_tag(wanted, published_tags, valid_stabilities or set())
+                        else:
+                            target = generator.latest_external_tag(wanted, published_tags, configured)
+
+                        if target is None:
+                            if configured and configured_exists:
+                                current.append(
+                                    f"{prefix}no newer published image tag family was found for version `{wanted}`; current tag `{configured}` exists"
+                                )
+                            else:
+                                warnings.append(
+                                    f"{prefix}no published image tag found for version `{wanted}` (current: `{configured}`)"
+                                )
+                        elif configured == target:
+                            current.append(f"{prefix}tag `{configured}` is the latest published tag for version `{wanted}`")
+                        else:
+                            updates.append(
+                                f"{prefix}updating tag to `{target}` for version `{wanted}` (current: `{configured}`)"
+                            )
+            elif image and not options:
+                if expects_options:
+                    warnings.append(
+                        f"{prefix}explicit image `{image}` is defined, but there are no resolved `options` entries to compare against published tags"
+                    )
+            elif options and expects_image:
+                warnings.append(f"{prefix}service options are defined, but no explicit container image was found in resolved workloads")
+            elif external:
+                current.append(f"{prefix}external service is managed outside Wodby; automated image and Helm version checks are not available")
+
+            if helm and helm_source and helm_chart and helm_version:
+                comparable = True
+                try:
+                    latest_chart = generator.get_helm_latest(helm_source, helm_chart)
+                    if latest_chart is None:
+                        warnings.append(
+                            f"{prefix}could not resolve latest Helm chart version for `{helm_chart}` from `{helm_source}`"
+                        )
+                    elif latest_chart == helm_version:
+                        current.append(f"{prefix}helm chart latest version is current (`{helm_version}`)")
+                    else:
+                        updates.append(
+                            f"{prefix}a new chart version is available `{latest_chart}` (current: `{helm_version}`)"
+                        )
+                except Exception as exc:
+                    warnings.append(f"{prefix}helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
+            elif expects_helm:
+                if not helm:
+                    warnings.append(f"{prefix}no resolved `helm` section was found for this non-external service")
                 else:
-                    updates.append(f"a new chart version is available `{latest_chart}` (current: `{helm_version}`)")
-            except Exception as exc:
-                warnings.append(f"helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
-        elif expects_helm:
-            if not helm:
-                warnings.append("no resolved `helm` section was found for this non-external service")
-            else:
-                warnings.append("resolved `helm` section is incomplete and cannot be compared automatically")
+                    warnings.append(f"{prefix}resolved `helm` section is incomplete and cannot be compared automatically")
 
-        if not comparable and not warnings and not external:
-            current.append("no automated version comparison target is defined in the resolved service manifest")
+            if not comparable and not external:
+                repo_comparable = False
+                if not expects_helm and not expects_options and not expects_image:
+                    current.append(f"{prefix}no automated version comparison target is defined in the resolved service manifest")
+            else:
+                repo_comparable = repo_comparable and comparable
+
+        if repo_expects_image and repo_missing_expected_image:
+            no_image.append(repo)
+        if repo_expects_helm and repo_missing_expected_helm:
+            no_helm.append(repo)
+        if repo_expects_options and repo_missing_expected_options:
+            no_options.append(repo)
 
         results.append(
             RepoResult(
                 repo=repo,
-                has_image=bool(image),
-                has_helm=bool(helm),
-                has_options=bool(options),
-                expects_image=expects_image,
-                expects_helm=expects_helm,
-                expects_options=expects_options,
-                comparable=comparable,
-                external=external,
-                service_type=service_type,
+                has_image=not repo_missing_expected_image,
+                has_helm=not repo_missing_expected_helm,
+                has_options=not repo_missing_expected_options,
+                expects_image=repo_expects_image,
+                expects_helm=repo_expects_helm,
+                expects_options=repo_expects_options,
+                comparable=repo_comparable,
+                external=repo_external,
+                service_type="mixed" if len(repo_service_types) > 1 else (next(iter(repo_service_types)) if repo_service_types else ""),
                 updates=updates,
                 current=current,
                 warnings=warnings,
