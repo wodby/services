@@ -63,7 +63,8 @@ jobs:
               rf"https://github\.com/{re.escape(owner)}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)",
               re.IGNORECASE,
           )
-          repos = sorted(set(pattern.findall(repo_source_text)))
+          excluded_repos = {"service"}
+          repos = sorted(set(pattern.findall(repo_source_text)) - excluded_repos)
 
           if repo_filter:
               matcher = re.compile(repo_filter)
@@ -131,6 +132,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           WODBY_GITHUB_TOKEN: ${{ secrets.WODBY_GITHUB_TOKEN }}
         run: |
+          if [[ ! "$SERVICE_REPO" =~ ^service-[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid service repo from matrix; expected a service-* repository name."
+            exit 1
+          fi
           REPORT_DIR="$RUNNER_TEMP/service-update-report/$SERVICE_REPO"
           echo "REPORT_DIR=$REPORT_DIR" >> "$GITHUB_ENV"
           python scripts/service_update_report.py \

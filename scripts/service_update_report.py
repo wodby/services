@@ -20,6 +20,7 @@ from packaging.version import InvalidVersion, Version
 
 README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
 README_MANAGED_SERVICES_HEADING = "## Managed services"
+EXCLUDED_README_REPOS = {"service"}
 DOCKER_TOKEN_URL = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
 DOCKER_TAGS_URL = "https://registry-1.docker.io/v2/{repo}/tags/list?n=10000"
 GHCR_TOKEN_URL = "https://ghcr.io/token?scope=repository:{repo}:pull"
@@ -518,7 +519,7 @@ def load_service_repos(readme_path: Path, owner: str, repo_filter: str) -> list[
     readme_text = readme_path.read_text()
     repo_source_text = readme_managed_services_table_text(readme_text) or readme_text
     pattern = re.compile(README_SERVICE_REPO_RE_TEMPLATE.format(owner=re.escape(owner)), re.IGNORECASE)
-    repos = sorted(set(pattern.findall(repo_source_text)))
+    repos = sorted(set(pattern.findall(repo_source_text)) - EXCLUDED_README_REPOS)
     if not repo_filter:
         return repos
     matcher = re.compile(repo_filter)
