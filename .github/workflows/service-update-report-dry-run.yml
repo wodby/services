@@ -178,10 +178,14 @@ jobs:
           print("- Full report: printed in the `Print Full Report` step log")
           print("")
 
-          if repo in report["missing_service_yml"]:
+          if repo in report.get("external_services", []):
+              print("- Status: external service excluded")
+          elif repo in report["missing_service_yml"]:
               print("- Status: missing `service.yml`")
           elif details and details["updates"]:
               print("- Status: update candidate")
+          elif details and (details.get("notifications") or details.get("eol_alerts")):
+              print("- Status: notification-only event")
           elif details and (
               details["warnings"]
               or not details.get("comparable", False)
@@ -209,6 +213,18 @@ jobs:
           if details and details["warnings"]:
               print("### Warnings")
               for message in details["warnings"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details.get("notifications"):
+              print("### Notification-Only Events")
+              for message in details["notifications"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details.get("eol_alerts"):
+              print("### EOL Alerts")
+              for message in details["eol_alerts"]:
                   print(f"- {message}")
               print("")
 
@@ -243,3 +259,47 @@ jobs:
 
           print("The full markdown report is printed in the job log above.")
           PY
+
+      - name: Upload Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-update-report-${{ matrix.repo }}
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  notify:
+    name: Notify Report Events
+    needs:
+      - discover-repos
+      - dry-run-report
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v5
+
+      - name: Download Report Artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: reports
+
+      - name: Send Email Digest
+        env:
+          REPORT_EMAIL_TO: ${{ secrets.REPORT_EMAIL_TO }}
+          REPORT_EMAIL_FROM: ${{ secrets.REPORT_EMAIL_FROM }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_SSL: ${{ secrets.SMTP_SSL }}
+          SMTP_STARTTLS: ${{ secrets.SMTP_STARTTLS }}
+        run: |
+          python scripts/service_report_email.py reports \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --event "${{ github.event_name }}" \
+            --sha "${{ github.sha }}" \
+            --workflow-result "${{ needs.dry-run-report.result }}"

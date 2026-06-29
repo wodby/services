@@ -28,9 +28,27 @@ GHCR_TAGS_URL = "https://ghcr.io/v2/{repo}/tags/list?n=10000"
 GITHUB_CONTENTS_URL = "https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 GITHUB_TAGS_URL = "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
 WODBY_CHART_URL = "https://raw.githubusercontent.com/{owner}/charts/main/{chart}/Chart.yaml"
+ENDOFLIFE_PRODUCTS_URL = "https://endoflife.date/api/v1/products"
+ENDOFLIFE_PRODUCT_URL = "https://endoflife.date/api/v1/products/{product}/"
+
+EOL_PRODUCT_ALIASES = {
+    "cloud-mariadb": "mariadb",
+    "cloud-mysql": "mysql",
+    "cloud-postgres": "postgresql",
+    "httpd": "apache-http-server",
+    "matomo": "php",
+    "nextjs": "nodejs",
+    "node": "nodejs",
+    "php-httpd": "apache-http-server",
+    "postgis": "postgresql",
+    "postgres": "postgresql",
+    "varnish": "vinyl-cache",
+    "vinyl": "vinyl-cache",
+}
 
 WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d+)*))?$")
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +86,39 @@ def family_match(base: str, wanted: str) -> bool:
     return base == wanted or base.startswith(f"{wanted}.")
 
 
+def normalized_manifest_eol(value: str) -> str:
+    return f"{value}T00:00:00+00:00"
+
+
+def eol_date_from_manifest(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if ISO_DATE_RE.match(text):
+        return text
+    if len(text) >= 10 and ISO_DATE_RE.match(text[:10]):
+        return text[:10]
+    return None
+
+
+def major_version(value: str | None) -> int | None:
+    parsed = parse_version(value)
+    return parsed.major if parsed is not None else None
+
+
+def is_major_version_change(current: str, latest: str) -> bool:
+    current_major = major_version(current)
+    latest_major = major_version(latest)
+    return current_major is not None and latest_major is not None and latest_major > current_major
+
+
+def normalize_service_key(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("service-"):
+        text = text[len("service-"):]
+    return text.replace("_", "-")
+
+
 @dataclass
 class RepoResult:
     repo: str
@@ -83,6 +134,10 @@ class RepoResult:
     updates: list[str]
     current: list[str]
     warnings: list[str]
+    notifications: list[str]
+    eol_updates: list[str]
+    eol_alerts: list[str]
+    major_updates: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -99,6 +154,10 @@ class RepoResult:
             "updates": self.updates,
             "current": self.current,
             "warnings": self.warnings,
+            "notifications": self.notifications,
+            "eol_updates": self.eol_updates,
+            "eol_alerts": self.eol_alerts,
+            "major_updates": self.major_updates,
         }
 
 
@@ -124,6 +183,8 @@ class UpdateReportGenerator:
         self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._resolved_service_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._wodby_chart_cache: dict[str, str] = {}
+        self._eol_product_index_cache: dict[str, str] | None = None
+        self._eol_product_cache: dict[str, dict[str, Any] | None] = {}
 
     def git_ls_remote(self, *args: str) -> str:
         process = subprocess.run(
@@ -468,6 +529,177 @@ class UpdateReportGenerator:
             tied.sort(key=lambda item: (item[1], item[2]), reverse=True)
         return tied[0][2]
 
+    def get_eol_product_index(self) -> dict[str, str]:
+        if self._eol_product_index_cache is not None:
+            return self._eol_product_index_cache
+
+        payload = self.fetch(ENDOFLIFE_PRODUCTS_URL).json()
+        index: dict[str, str] = {}
+        for product in payload.get("result") or []:
+            if not isinstance(product, dict) or not product.get("name"):
+                continue
+            name = normalize_service_key(str(product["name"]))
+            index[name] = str(product["name"])
+            for alias in product.get("aliases") or []:
+                index[normalize_service_key(str(alias))] = str(product["name"])
+
+        self._eol_product_index_cache = index
+        return index
+
+    def resolve_eol_product_name(self, repo: str, service_name: str) -> str | None:
+        keys = [normalize_service_key(service_name), normalize_service_key(repo)]
+        candidates: list[str] = []
+        for key in keys:
+            if not key:
+                continue
+            if key in EOL_PRODUCT_ALIASES:
+                candidates.append(EOL_PRODUCT_ALIASES[key])
+            if key.endswith("-php"):
+                candidates.append("php")
+            if key.endswith("-nginx"):
+                candidates.append("nginx")
+            if key.endswith("-httpd"):
+                candidates.append("apache-http-server")
+            if key.endswith("-varnish") or key.endswith("-vinyl"):
+                candidates.append("vinyl-cache")
+            candidates.append(key)
+
+        product_index = self.get_eol_product_index()
+        for candidate in candidates:
+            product = product_index.get(normalize_service_key(candidate))
+            if product:
+                return product
+        return None
+
+    def get_eol_product_data(self, product_name: str) -> dict[str, Any] | None:
+        if product_name in self._eol_product_cache:
+            return self._eol_product_cache[product_name]
+
+        response = self.session.get(ENDOFLIFE_PRODUCT_URL.format(product=product_name), timeout=60)
+        if response.status_code == 404:
+            self._eol_product_cache[product_name] = None
+            return None
+        response.raise_for_status()
+        payload = response.json().get("result")
+        if not isinstance(payload, dict):
+            payload = None
+        self._eol_product_cache[product_name] = payload
+        return payload
+
+    @staticmethod
+    def best_eol_release(product_data: dict[str, Any], version: str) -> dict[str, Any] | None:
+        releases = [release for release in product_data.get("releases") or [] if isinstance(release, dict)]
+        for release in releases:
+            if str(release.get("name")) == version:
+                return release
+
+        version_parts = version.split(".")
+        if len(version_parts) != 1:
+            return None
+
+        candidates: list[tuple[Version | None, dict[str, Any]]] = []
+        for release in releases:
+            name = str(release.get("name") or "")
+            if family_match(name, version):
+                candidates.append((parse_version(name), release))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0] is not None, item[0] or Version("0")), reverse=True)
+        return candidates[0][1]
+
+    @staticmethod
+    def latest_non_eol_release(product_data: dict[str, Any]) -> dict[str, Any] | None:
+        candidates: list[tuple[Version | None, dict[str, Any]]] = []
+        for release in product_data.get("releases") or []:
+            if not isinstance(release, dict) or release.get("isEol") is True:
+                continue
+            parsed = parse_version(str(release.get("name") or ""))
+            if parsed is None:
+                continue
+            candidates.append((parsed, release))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def check_eol_options(
+        self,
+        repo: str,
+        service_name: str,
+        options: list[Any],
+        raw_options: list[Any],
+        prefix: str,
+    ) -> dict[str, list[str]]:
+        result = {
+            "updates": [],
+            "alerts": [],
+            "major_updates": [],
+            "notifications": [],
+            "warnings": [],
+        }
+        if not options:
+            return result
+
+        product_name = self.resolve_eol_product_name(repo, service_name)
+        if product_name is None:
+            return result
+
+        product_data = self.get_eol_product_data(product_name)
+        if product_data is None:
+            return result
+
+        product_label = str(product_data.get("label") or product_name)
+        updateable_options = {
+            str(option.get("version")): option
+            for option in raw_options
+            if isinstance(option, dict) and option.get("version") is not None
+        }
+        configured_versions = [
+            str(option.get("version"))
+            for option in options
+            if isinstance(option, dict) and option.get("version") is not None
+        ]
+
+        for option in options:
+            if not isinstance(option, dict) or option.get("version") is None:
+                continue
+            version = str(option.get("version"))
+            release = self.best_eol_release(product_data, version)
+            if release is None:
+                result["warnings"].append(
+                    f"{prefix}no endoflife.date release cycle was found for {product_label} version `{version}`"
+                )
+                continue
+
+            eol_from = release.get("eolFrom")
+            if isinstance(eol_from, str) and ISO_DATE_RE.match(eol_from):
+                raw_option = updateable_options.get(version)
+                current_eol = eol_date_from_manifest(raw_option.get("eol")) if raw_option is not None else None
+                target_eol = normalized_manifest_eol(eol_from)
+                if raw_option is not None and current_eol != eol_from:
+                    result["updates"].append(
+                        f"{prefix}updating `eol` to `{target_eol}` for {product_label} version `{version}`"
+                    )
+
+            if release.get("isEol") is True:
+                eol_label = eol_from if isinstance(eol_from, str) and eol_from else "an unknown date"
+                result["alerts"].append(f"{prefix}{product_label} version `{version}` is EOL since {eol_label}")
+
+        configured_majors = [major_version(version) for version in configured_versions]
+        configured_majors = [value for value in configured_majors if value is not None]
+        latest_release = self.latest_non_eol_release(product_data)
+        latest_name = str(latest_release.get("name")) if latest_release else None
+        latest_major = major_version(latest_name)
+        if configured_majors and latest_name and latest_major is not None and latest_major > max(configured_majors):
+            message = (
+                f"{prefix}new {product_label} major version `{latest_name}` is available "
+                f"(highest configured major: `{max(configured_majors)}`)"
+            )
+            result["major_updates"].append(message)
+            result["notifications"].append(message)
+
+        return result
+
     @staticmethod
     def get_service_images(service_data: dict[str, Any]) -> list[str]:
         primary_images: list[str] = []
@@ -533,6 +765,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
 
     results: list[RepoResult] = []
     missing_service_yml: list[str] = []
+    external_service_repos: list[str] = []
     no_image: list[str] = []
     no_helm: list[str] = []
     no_options: list[str] = []
@@ -546,6 +779,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         updates: list[str] = []
         current: list[str] = []
         warnings: list[str] = []
+        notifications: list[str] = []
+        eol_updates: list[str] = []
+        eol_alerts: list[str] = []
+        major_updates: list[str] = []
         repo_expects_image = False
         repo_expects_helm = False
         repo_expects_options = False
@@ -555,6 +792,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         repo_comparable = True
         repo_external = True
         repo_service_types: set[str] = set()
+        repo_has_reportable_manifest = False
 
         multiple_manifests = len(manifest_paths) > 1
 
@@ -578,9 +816,16 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
 
             service_type = str(service_data.get("type") or raw_service_data.get("type") or "")
             external = bool(service_data.get("external"))
+            label = str(raw_service_data.get("name") or service_data.get("name") or manifest_path.rsplit("/", 1)[0])
+            prefix = f"[{label}] " if multiple_manifests else ""
+            if external:
+                continue
+
+            repo_has_reportable_manifest = True
             images = generator.get_service_images(service_data)
             image = images[0] if images else None
             options = service_data.get("options") or []
+            raw_options = raw_service_data.get("options") or []
             helm = service_data.get("helm") or None
             helm_source = helm.get("source") if helm else None
             helm_chart = (helm.get("chart") or helm_source) if helm else None
@@ -599,8 +844,16 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             repo_missing_expected_helm = repo_missing_expected_helm or (expects_helm and not helm)
             repo_missing_expected_options = repo_missing_expected_options or (expects_options and not options)
 
-            label = str(raw_service_data.get("name") or service_data.get("name") or manifest_path.rsplit("/", 1)[0])
-            prefix = f"[{label}] " if multiple_manifests else ""
+            try:
+                eol_result = generator.check_eol_options(repo, label, options, raw_options, prefix)
+                updates.extend(eol_result["updates"])
+                eol_updates.extend(eol_result["updates"])
+                eol_alerts.extend(eol_result["alerts"])
+                major_updates.extend(eol_result["major_updates"])
+                notifications.extend(eol_result["notifications"])
+                warnings.extend(eol_result["warnings"])
+            except Exception as exc:
+                warnings.append(f"{prefix}endoflife.date lookup failed: {exc}")
 
             if len(images) > 1:
                 warnings.append(
@@ -651,8 +904,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     )
             elif options and expects_image:
                 warnings.append(f"{prefix}service options are defined, but no explicit container image was found in resolved workloads")
-            elif external:
-                current.append(f"{prefix}external service is managed outside Wodby; automated image and Helm version checks are not available")
 
             if helm and helm_source and helm_chart and helm_version:
                 comparable = True
@@ -664,6 +915,13 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     elif latest_chart == helm_version:
                         current.append(f"{prefix}helm chart latest version is current (`{helm_version}`)")
+                    elif is_major_version_change(helm_version, latest_chart):
+                        message = (
+                            f"{prefix}new major Helm chart version `{latest_chart}` is available "
+                            f"for `{helm_chart}` (current: `{helm_version}`); manual review required"
+                        )
+                        major_updates.append(message)
+                        notifications.append(message)
                     else:
                         updates.append(
                             f"{prefix}a new chart version is available `{latest_chart}` (current: `{helm_version}`)"
@@ -682,6 +940,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     current.append(f"{prefix}no automated version comparison target is defined in the resolved service manifest")
             else:
                 repo_comparable = repo_comparable and comparable
+
+        if not repo_has_reportable_manifest:
+            external_service_repos.append(repo)
+            continue
 
         if repo_expects_image and repo_missing_expected_image:
             no_image.append(repo)
@@ -705,6 +967,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 updates=updates,
                 current=current,
                 warnings=warnings,
+                notifications=notifications,
+                eol_updates=eol_updates,
+                eol_alerts=eol_alerts,
+                major_updates=major_updates,
             )
         )
 
@@ -714,6 +980,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         for result in results
         if not result.updates
         and not result.warnings
+        and not result.notifications
+        and not result.eol_alerts
         and result.current
         and result.comparable
     ]
@@ -728,14 +996,21 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         "repo_filter": args.repo_filter,
         "totals": {
             "repos_in_readme": len(repos),
+            "repos_reported": len(results),
+            "external_excluded": len(external_service_repos),
             "updates": len(updates_section),
             "no_changes": len(no_changes_section),
             "special": len(special_section) + len(missing_service_yml),
+            "notifications": sum(1 for result in results if result.notifications),
+            "eol_updates": sum(1 for result in results if result.eol_updates),
+            "eol_alerts": sum(1 for result in results if result.eol_alerts),
+            "major_updates": sum(1 for result in results if result.major_updates),
         },
         "updates": {result.repo: result.updates for result in updates_section},
         "no_changes": {result.repo: result.current for result in no_changes_section},
         "special": {result.repo: result.to_dict() for result in special_section},
         "missing_service_yml": missing_service_yml,
+        "external_services": external_service_repos,
         "category_lists": {
             "no_image": no_image,
             "no_helm": no_helm,
@@ -752,9 +1027,15 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"Report date: {report['generated_at']}")
     lines.append("")
     lines.append(f"- Repos in README: {report['totals']['repos_in_readme']}")
+    lines.append(f"- Repos reported: {report['totals']['repos_reported']}")
+    lines.append(f"- External repos excluded: {report['totals']['external_excluded']}")
     lines.append(f"- Repos needing updates: {report['totals']['updates']}")
     lines.append(f"- Fully comparable repos with no changes: {report['totals']['no_changes']}")
     lines.append(f"- Special-case repos: {report['totals']['special']}")
+    lines.append(f"- Repos with notification-only events: {report['totals']['notifications']}")
+    lines.append(f"- Repos with EOL field updates: {report['totals']['eol_updates']}")
+    lines.append(f"- Repos with EOL alerts: {report['totals']['eol_alerts']}")
+    lines.append(f"- Repos with major-version notifications: {report['totals']['major_updates']}")
     lines.append("")
 
     lines.append("## Updates Needed")
@@ -768,6 +1049,28 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"- No change: {message}")
         for message in repo_details["warnings"]:
             lines.append(f"- Warning: {message}")
+        lines.append("")
+
+    lines.append("## Notification-Only Events")
+    lines.append("")
+    for item in sorted(report["per_repo"], key=lambda value: value["repo"]):
+        messages = item.get("notifications") or []
+        if not messages:
+            continue
+        lines.append(f"### {item['repo']}")
+        for message in messages:
+            lines.append(f"- {message}")
+        lines.append("")
+
+    lines.append("## EOL Alerts")
+    lines.append("")
+    for item in sorted(report["per_repo"], key=lambda value: value["repo"]):
+        messages = item.get("eol_alerts") or []
+        if not messages:
+            continue
+        lines.append(f"### {item['repo']}")
+        for message in messages:
+            lines.append(f"- {message}")
         lines.append("")
 
     lines.append("## No Changes")
@@ -840,7 +1143,9 @@ def main() -> int:
         "Summary: "
         f"{report['totals']['updates']} repos need updates, "
         f"{report['totals']['no_changes']} fully comparable repos have no changes, "
-        f"{report['totals']['special']} repos are special cases."
+        f"{report['totals']['special']} repos are special cases, "
+        f"{report['totals']['notifications']} repos have notification-only events, "
+        f"{report['totals']['external_excluded']} external repos were excluded."
     )
     return 0
 
