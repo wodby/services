@@ -277,9 +277,9 @@ jobs:
               if details.get("expects_image") and not details["has_image"]:
                   print("- No explicit image comparison target")
               if details.get("expects_helm") and not details["has_helm"]:
-                  print("- No resolved `helm`")
+                  print("- No local `helm`")
               if details.get("expects_options") and not details["has_options"]:
-                  print("- No resolved `options`")
+                  print("- No local `options`")
               print("")
 
           if (

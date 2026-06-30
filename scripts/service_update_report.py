@@ -50,6 +50,7 @@ WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
+CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+\.\d+)$")
 BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image stability tag updated to (?P<tag>\S+)", re.IGNORECASE)
 FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):", re.MULTILINE)
 README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
@@ -208,6 +209,49 @@ def latest_stable_semver_tag(tags: set[str]) -> tuple[str, str, Version] | None:
     return tag, prefix, parsed
 
 
+def semver_tag_candidates(tags: set[str]) -> list[tuple[Version, str, str]]:
+    candidates: list[tuple[Version, str, str]] = []
+    for tag in tags:
+        match = SEMVER_TAG_RE.match(tag)
+        if not match:
+            continue
+        parsed = parse_version(match.group("version"))
+        if parsed is None or parsed.is_prerelease:
+            continue
+        candidates.append((parsed, tag, match.group("prefix")))
+    candidates.sort(reverse=True)
+    return candidates
+
+
+def parse_caret_constraint(value: Any) -> Version | None:
+    match = CARET_CONSTRAINT_RE.match(str(value or "").strip())
+    if not match:
+        return None
+    return parse_version(match.group("version"))
+
+
+def caret_upper_bound(base: Version) -> Version:
+    if base.major > 0:
+        return Version(f"{base.major + 1}.0.0")
+    if base.minor > 0:
+        return Version(f"0.{base.minor + 1}.0")
+    return Version(f"0.0.{base.micro + 1}")
+
+
+def latest_matching_caret_tag(tags: set[str], base: Version) -> tuple[str, Version] | None:
+    upper_bound = caret_upper_bound(base)
+    for parsed, tag, _prefix in semver_tag_candidates(tags):
+        if base <= parsed < upper_bound:
+            return tag, parsed
+    return None
+
+
+def format_from_version_constraint(tag: str, current_constraint: str) -> str:
+    prefix = "^v" if current_constraint.strip().startswith("^v") else "^"
+    normalized_tag = tag[1:] if tag.startswith("v") else tag
+    return f"{prefix}{normalized_tag}"
+
+
 def render_release_description(
     repo: str,
     previous_tag: str,
@@ -234,6 +278,11 @@ def render_release_description(
         lines.append("")
         lines.append("Image changes:")
         lines.extend(image_note_blocks)
+    parent_note_blocks = render_parent_service_change_notes(planned_changes)
+    if parent_note_blocks:
+        lines.append("")
+        lines.append("Parent service changes:")
+        lines.extend(parent_note_blocks)
     return "\n".join(lines)
 
 
@@ -304,6 +353,51 @@ def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str
         else:
             lines.append("  Changes:")
             lines.append("  - No image tag change notes were found.")
+    return lines
+
+
+def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for change in planned_changes:
+        if change.get("change_type") != "parent_service_version":
+            continue
+        parent_repo = str(change.get("parent_repo") or "unknown parent")
+        parent_tag = str(change.get("parent_tag") or str(change.get("after") or "").lstrip("^"))
+        notes = change.get("parent_change_notes") or []
+        note = notes[0] if notes else None
+        group_key = (
+            str(note.get("repo") or parent_repo) if note else parent_repo,
+            str(note.get("tag") or parent_tag) if note else parent_tag,
+        )
+        group = grouped.setdefault(
+            group_key,
+            {
+                "repo": group_key[0],
+                "tag": group_key[1],
+                "note": note,
+                "updates": [],
+            },
+        )
+        group["updates"].append(
+            {
+                "file": str(change.get("file") or "service.yml"),
+                "before": format_diff_value(change.get("before")),
+                "after": format_diff_value(change.get("after")),
+            }
+        )
+
+    for group in grouped.values():
+        lines.append(f"- {group['repo']}:{group['tag']}")
+        lines.append("  Child constraints updated:")
+        for item in group["updates"]:
+            lines.append(f"  - {item['file']}: {item['before']} -> {item['after']}")
+        lines.append("  Changes:")
+        note = group.get("note")
+        if note:
+            lines.extend(render_tag_note_details(note, 2))
+        else:
+            lines.append("  - No parent service tag description was found.")
     return lines
 
 
@@ -411,7 +505,6 @@ class UpdateReportGenerator:
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
         self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
-        self._resolved_service_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._wodby_chart_cache: dict[str, str] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
         self._eol_product_cache: dict[str, dict[str, Any] | None] = {}
@@ -505,80 +598,6 @@ class UpdateReportGenerator:
             return service_name
         return f"service-{service_name}"
 
-    @staticmethod
-    def _is_named_object_list(items: list[Any]) -> bool:
-        return bool(items) and all(isinstance(item, dict) and "name" in item for item in items)
-
-    def merge_values(self, base: Any, override: Any) -> Any:
-        if base is None:
-            return copy.deepcopy(override)
-        if override is None:
-            return copy.deepcopy(base)
-
-        if isinstance(base, dict) and isinstance(override, dict):
-            result = copy.deepcopy(base)
-            for key, value in override.items():
-                if key == "from":
-                    continue
-                if key in result:
-                    result[key] = self.merge_values(result[key], value)
-                else:
-                    result[key] = copy.deepcopy(value)
-            return result
-
-        if isinstance(base, list) and isinstance(override, list):
-            if self._is_named_object_list(base + override):
-                merged = [copy.deepcopy(item) for item in base]
-                index_by_name = {
-                    item["name"]: position
-                    for position, item in enumerate(merged)
-                    if isinstance(item, dict) and "name" in item
-                }
-                for item in override:
-                    name = item["name"]
-                    if name in index_by_name:
-                        merged[index_by_name[name]] = self.merge_values(merged[index_by_name[name]], item)
-                    else:
-                        index_by_name[name] = len(merged)
-                        merged.append(copy.deepcopy(item))
-                return merged
-            return copy.deepcopy(override)
-
-        return copy.deepcopy(override)
-
-    def get_resolved_service_data(
-        self,
-        repo: str,
-        manifest_path: str = "service.yml",
-        chain: tuple[tuple[str, str], ...] = (),
-    ) -> dict[str, Any] | None:
-        cache_key = (repo, manifest_path)
-        if cache_key in self._resolved_service_cache:
-            return self._resolved_service_cache[cache_key]
-
-        if cache_key in chain:
-            cycle = " -> ".join(f"{repo_name}:{path}" for repo_name, path in chain + (cache_key,))
-            raise RuntimeError(f"detected inheritance cycle: {cycle}")
-
-        service_data = self.get_service_data(repo, manifest_path)
-        if service_data is None:
-            self._resolved_service_cache[cache_key] = None
-            return None
-
-        parent_name = service_data.get("from")
-        if not parent_name:
-            resolved = copy.deepcopy(service_data)
-        else:
-            parent_repo = self.service_name_to_repo(str(parent_name))
-            parent_data = self.get_resolved_service_data(parent_repo, "service.yml", chain + (cache_key,))
-            if parent_data is None:
-                raise RuntimeError(f"unable to resolve inherited service `{parent_repo}` for `{repo}`")
-            resolved = self.merge_values(parent_data, service_data)
-            resolved["from"] = parent_name
-
-        self._resolved_service_cache[cache_key] = resolved
-        return resolved
-
     def get_github_tags(self, owner: str, repo: str) -> set[str]:
         cache_key = (owner, repo)
         if cache_key in self._github_tags_cache:
@@ -589,7 +608,7 @@ class UpdateReportGenerator:
         while True:
             url = GITHUB_TAGS_URL.format(owner=owner, repo=repo, page=page)
             response = self.session.get(url, headers=self.github_headers, timeout=60)
-            if response.status_code == 403:
+            if response.status_code in (401, 403):
                 output = self.git_ls_remote("--tags", "--refs", f"https://github.com/{owner}/{repo}.git")
                 tags = {
                     line.split("refs/tags/", 1)[1]
@@ -609,6 +628,87 @@ class UpdateReportGenerator:
 
         self._github_tags_cache[cache_key] = tags
         return tags
+
+    def check_parent_service_version(
+        self,
+        parent_name: str,
+        from_version: Any,
+        prefix: str,
+        manifest_path: str,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "updates": [],
+            "current": [],
+            "warnings": [],
+            "planned_changes": [],
+            "comparable": False,
+        }
+        parent_repo = self.service_name_to_repo(str(parent_name))
+        current_constraint = str(from_version or "").strip()
+        if not current_constraint:
+            result["warnings"].append(
+                f"{prefix}parent service `{parent_repo}` is set via `from`, but `fromVersion` is missing"
+            )
+            return result
+
+        base_version = parse_caret_constraint(current_constraint)
+        if base_version is None:
+            result["warnings"].append(
+                f"{prefix}`fromVersion` `{current_constraint}` is not a supported caret semver constraint"
+            )
+            return result
+
+        result["comparable"] = True
+        tags = self.get_github_tags(self.owner, parent_repo)
+        latest = latest_matching_caret_tag(tags, base_version)
+        if latest is None:
+            result["warnings"].append(
+                f"{prefix}no stable `{parent_repo}` git tag matched `fromVersion` `{current_constraint}`"
+            )
+            return result
+
+        latest_tag, latest_version = latest
+        target_constraint = format_from_version_constraint(latest_tag, current_constraint)
+        if latest_version == base_version and target_constraint == current_constraint:
+            result["current"].append(
+                f"{prefix}parent service `{parent_repo}` latest compatible tag is current (`{current_constraint}`)"
+            )
+            return result
+
+        message = (
+            f"{prefix}updating parent service `{parent_repo}` to `{target_constraint}` "
+            f"(current: `{current_constraint}`, latest compatible tag: `{latest_tag}`)"
+        )
+        try:
+            parent_change_notes = [self.build_wodby_tag_note_tree(parent_repo, latest_tag, None)]
+        except Exception as exc:
+            parent_change_notes = [
+                {
+                    "repo": f"{self.owner}/{parent_repo}",
+                    "tag": latest_tag,
+                    "message": f"Parent service tag description lookup failed: {exc}",
+                    "url": f"https://github.com/{self.owner}/{parent_repo}/releases/tag/{latest_tag}",
+                    "base_changes": [],
+                }
+            ]
+        result["updates"].append(message)
+        result["planned_changes"].append(
+            make_planned_change(
+                manifest_path,
+                "fromVersion",
+                "fromVersion",
+                current_constraint,
+                target_constraint,
+                message,
+                {
+                    "change_type": "parent_service_version",
+                    "parent_repo": parent_repo,
+                    "parent_tag": latest_tag,
+                    "parent_change_notes": parent_change_notes,
+                },
+            )
+        )
+        return result
 
     def get_github_tag_note(self, owner: str, repo: str, tag: str) -> dict[str, Any] | None:
         cache_key = (owner, repo, tag)
@@ -1224,25 +1324,22 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 repo_comparable = False
                 continue
 
-            try:
-                service_data = generator.get_resolved_service_data(repo, manifest_path)
-            except Exception as exc:
-                warnings.append(f"[{manifest_path}] inheritance resolution failed: {exc}")
-                service_data = copy.deepcopy(raw_service_data)
-
-            if service_data is None:
-                warnings.append(f"[{manifest_path}] resolved service manifest is empty")
+            service_data = raw_service_data
+            if not service_data:
+                warnings.append(f"[{manifest_path}] service manifest is empty")
                 repo_comparable = False
                 continue
 
-            service_type = str(service_data.get("type") or raw_service_data.get("type") or "")
+            service_type = str(raw_service_data.get("type") or "")
             external = bool(service_data.get("external"))
-            label = str(raw_service_data.get("name") or service_data.get("name") or manifest_path.rsplit("/", 1)[0])
+            label = str(raw_service_data.get("name") or manifest_path.rsplit("/", 1)[0])
             prefix = f"[{label}] " if multiple_manifests else ""
             if external:
                 continue
 
             repo_has_reportable_manifest = True
+            parent_name = raw_service_data.get("from")
+            from_version = raw_service_data.get("fromVersion")
             images = generator.get_service_images(service_data)
             image = images[0] if images else None
             options = service_data.get("options") or []
@@ -1253,9 +1350,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             helm_source = helm.get("source") if helm else None
             helm_chart = (helm.get("chart") or helm_source) if helm else None
             helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
-            expects_image = not external and service_type != "infrastructure"
-            expects_helm = not external
-            expects_options = not external and service_type != "infrastructure"
+            expects_image = not external and not parent_name and service_type != "infrastructure"
+            expects_helm = not external and not parent_name
+            expects_options = not external and not parent_name and service_type != "infrastructure"
             comparable = False
 
             repo_service_types.add(service_type)
@@ -1266,6 +1363,19 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             repo_missing_expected_image = repo_missing_expected_image or (expects_image and not image)
             repo_missing_expected_helm = repo_missing_expected_helm or (expects_helm and not helm)
             repo_missing_expected_options = repo_missing_expected_options or (expects_options and not options)
+
+            if parent_name:
+                try:
+                    parent_result = generator.check_parent_service_version(
+                        str(parent_name), from_version, prefix, manifest_path
+                    )
+                    updates.extend(parent_result["updates"])
+                    current.extend(parent_result["current"])
+                    warnings.extend(parent_result["warnings"])
+                    planned_changes.extend(parent_result["planned_changes"])
+                    comparable = comparable or bool(parent_result["comparable"])
+                except Exception as exc:
+                    warnings.append(f"{prefix}parent service version lookup failed for `{parent_name}`: {exc}")
 
             try:
                 eol_result = generator.check_eol_options(repo, label, options, raw_options, prefix, manifest_path)
@@ -1352,10 +1462,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             elif image and not options:
                 if expects_options:
                     warnings.append(
-                        f"{prefix}explicit image `{image}` is defined, but there are no resolved `options` entries to compare against published tags"
+                        f"{prefix}explicit image `{image}` is defined, but there are no local `options` entries to compare against published tags"
                     )
             elif options and expects_image:
-                warnings.append(f"{prefix}service options are defined, but no explicit container image was found in resolved workloads")
+                warnings.append(f"{prefix}service options are defined, but no explicit container image was found in local workloads")
 
             if helm and helm_source and helm_chart and helm_version:
                 comparable = True
@@ -1398,14 +1508,14 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     warnings.append(f"{prefix}helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
             elif expects_helm:
                 if not helm:
-                    warnings.append(f"{prefix}no resolved `helm` section was found for this non-external service")
+                    warnings.append(f"{prefix}no local `helm` section was found for this non-external service")
                 else:
-                    warnings.append(f"{prefix}resolved `helm` section is incomplete and cannot be compared automatically")
+                    warnings.append(f"{prefix}local `helm` section is incomplete and cannot be compared automatically")
 
             if not comparable and not external:
                 repo_comparable = False
                 if not expects_helm and not expects_options and not expects_image:
-                    current.append(f"{prefix}no automated version comparison target is defined in the resolved service manifest")
+                    current.append(f"{prefix}no automated version comparison target is defined in the service manifest")
             else:
                 repo_comparable = repo_comparable and comparable
 
@@ -1662,9 +1772,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         if details.get("expects_image") and not details["has_image"]:
             flags.append("no explicit image comparison target")
         if details.get("expects_helm") and not details["has_helm"]:
-            flags.append("no resolved helm configuration")
+            flags.append("no local helm configuration")
         if details.get("expects_options") and not details["has_options"]:
-            flags.append("no resolved options")
+            flags.append("no local options")
         if flags:
             lines.append(f"- {repo}: {', '.join(flags)}")
         else:
@@ -1684,10 +1794,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- No explicit image comparison target: {', '.join(category_lists['no_image']) if category_lists['no_image'] else 'none'}"
     )
     lines.append(
-        f"- No resolved `helm`: {', '.join(category_lists['no_helm']) if category_lists['no_helm'] else 'none'}"
+        f"- No local `helm`: {', '.join(category_lists['no_helm']) if category_lists['no_helm'] else 'none'}"
     )
     lines.append(
-        f"- No resolved `options`: {', '.join(category_lists['no_options']) if category_lists['no_options'] else 'none'}"
+        f"- No local `options`: {', '.join(category_lists['no_options']) if category_lists['no_options'] else 'none'}"
     )
     return "\n".join(lines) + "\n"
 
