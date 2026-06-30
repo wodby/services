@@ -212,6 +212,27 @@ jobs:
                   print("```")
                   print("")
 
+          release = (details or {}).get("planned_release") or {}
+          if release.get("status") == "planned":
+              print("### Planned Git Tag Release")
+              print("- Dry run only: no git tag was created.")
+              print(f"- Previous tag: `{release['previous_tag']}`")
+              print(f"- New patch tag: `{release['tag']}`")
+              print(f"- Title: `{release['title']}`")
+              print("- Commands after applying and committing the manifest change:")
+              for command in release.get("commands") or []:
+                  print(f"  - `{command}`")
+              print("")
+              print("Description:")
+              print("```markdown")
+              print(str(release.get("description") or "").rstrip())
+              print("```")
+              print("")
+          elif release.get("status") == "blocked":
+              print("### Git Tag Release Blocked")
+              print(f"- {release.get('reason') or 'release tag could not be calculated'}")
+              print("")
+
           if details and details.get("updates_without_local_diff"):
               print("### Updates Without Local Manifest Diff")
               for message in details["updates_without_local_diff"]:

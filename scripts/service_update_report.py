@@ -49,6 +49,7 @@ EOL_PRODUCT_ALIASES = {
 WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d+)*))?$")
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,6 +184,76 @@ def render_planned_diffs(planned_changes: list[dict[str, Any]]) -> list[str]:
     return diffs
 
 
+def latest_stable_semver_tag(tags: set[str]) -> tuple[str, str, Version] | None:
+    candidates: list[tuple[Version, str, str]] = []
+    for tag in tags:
+        match = SEMVER_TAG_RE.match(tag)
+        if not match:
+            continue
+        parsed = parse_version(match.group("version"))
+        if parsed is None or parsed.is_prerelease:
+            continue
+        candidates.append((parsed, tag, match.group("prefix")))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    parsed, tag, prefix = candidates[0]
+    return tag, prefix, parsed
+
+
+def render_release_description(
+    repo: str,
+    previous_tag: str,
+    next_tag: str,
+    planned_changes: list[dict[str, Any]],
+) -> str:
+    lines = [
+        f"{repo} service update",
+        "",
+        f"Previous tag: {previous_tag}",
+        f"New tag: {next_tag}",
+        "",
+        "Changes:",
+    ]
+    for change in planned_changes:
+        file_path = str(change.get("file") or "service.yml")
+        field_path = str(change.get("path") or change.get("key") or "value")
+        before = format_diff_value(change.get("before"))
+        after = format_diff_value(change.get("after"))
+        lines.append(f"- {file_path} {field_path}: {before} -> {after}")
+    return "\n".join(lines)
+
+
+def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[str, Any]]) -> dict[str, Any]:
+    latest_tag = latest_stable_semver_tag(tags)
+    if latest_tag is None:
+        return {
+            "status": "blocked",
+            "reason": "no existing stable semantic git tag was found; patch tag cannot be calculated",
+            "previous_tag": None,
+            "tag": None,
+            "title": None,
+            "description": None,
+            "commands": [],
+        }
+
+    previous_tag, prefix, previous_version = latest_tag
+    next_tag = f"{prefix}{previous_version.major}.{previous_version.minor}.{previous_version.micro + 1}"
+    description = render_release_description(repo, previous_tag, next_tag, planned_changes)
+    return {
+        "status": "planned",
+        "reason": None,
+        "previous_tag": previous_tag,
+        "tag": next_tag,
+        "title": f"{repo} {next_tag}",
+        "description": description,
+        "commands": [
+            f"git tag -a {next_tag} -F release-notes.md",
+            f"git push origin {next_tag}",
+        ],
+    }
+
+
 @dataclass
 class RepoResult:
     repo: str
@@ -205,6 +276,7 @@ class RepoResult:
     planned_changes: list[dict[str, Any]]
     planned_diffs: list[str]
     updates_without_local_diff: list[str]
+    planned_release: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,6 +300,7 @@ class RepoResult:
             "planned_changes": self.planned_changes,
             "planned_diffs": self.planned_diffs,
             "updates_without_local_diff": self.updates_without_local_diff,
+            "planned_release": self.planned_release,
         }
 
 
@@ -1068,6 +1141,21 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         if repo_expects_options and repo_missing_expected_options:
             no_options.append(repo)
 
+        planned_release = None
+        if planned_changes:
+            try:
+                planned_release = build_planned_release(repo, generator.get_github_tags(args.owner, repo), planned_changes)
+            except Exception as exc:
+                planned_release = {
+                    "status": "blocked",
+                    "reason": f"git tag lookup failed: {exc}",
+                    "previous_tag": None,
+                    "tag": None,
+                    "title": None,
+                    "description": None,
+                    "commands": [],
+                }
+
         results.append(
             RepoResult(
                 repo=repo,
@@ -1090,6 +1178,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 planned_changes=planned_changes,
                 planned_diffs=render_planned_diffs(planned_changes),
                 updates_without_local_diff=updates_without_local_diff,
+                planned_release=planned_release,
             )
         )
 
@@ -1124,6 +1213,16 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             "eol_updates": sum(1 for result in results if result.eol_updates),
             "eol_alerts": sum(1 for result in results if result.eol_alerts),
             "major_updates": sum(1 for result in results if result.major_updates),
+            "planned_releases": sum(
+                1
+                for result in results
+                if result.planned_release and result.planned_release.get("status") == "planned"
+            ),
+            "release_blockers": sum(
+                1
+                for result in results
+                if result.planned_release and result.planned_release.get("status") == "blocked"
+            ),
         },
         "updates": {result.repo: result.updates for result in updates_section},
         "no_changes": {result.repo: result.current for result in no_changes_section},
@@ -1155,6 +1254,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Repos with EOL field updates: {report['totals']['eol_updates']}")
     lines.append(f"- Repos with EOL alerts: {report['totals']['eol_alerts']}")
     lines.append(f"- Repos with major-version notifications: {report['totals']['major_updates']}")
+    lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
+    lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
     lines.append("")
 
     lines.append("## Updates Needed")
@@ -1183,6 +1284,46 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines.extend(str(planned_diff).splitlines())
                 lines.append("```")
                 lines.append("")
+
+    planned_release_items = [
+        item
+        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+        if (item.get("planned_release") or {}).get("status") == "planned"
+    ]
+    if planned_release_items:
+        lines.append("## Planned Git Tag Releases")
+        lines.append("")
+        lines.append("Dry run only: no git tags are created by this workflow.")
+        lines.append("")
+        for item in planned_release_items:
+            release = item["planned_release"]
+            lines.append(f"### {item['repo']}")
+            lines.append(f"- Previous tag: `{release['previous_tag']}`")
+            lines.append(f"- New patch tag: `{release['tag']}`")
+            lines.append(f"- Title: `{release['title']}`")
+            lines.append("- Commands after applying and committing the manifest change:")
+            for command in release.get("commands") or []:
+                lines.append(f"  - `{command}`")
+            lines.append("")
+            lines.append("Description:")
+            lines.append("```markdown")
+            lines.extend(str(release.get("description") or "").splitlines())
+            lines.append("```")
+            lines.append("")
+
+    blocked_release_items = [
+        item
+        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+        if (item.get("planned_release") or {}).get("status") == "blocked"
+    ]
+    if blocked_release_items:
+        lines.append("## Git Tag Release Blockers")
+        lines.append("")
+        for item in blocked_release_items:
+            release = item["planned_release"]
+            lines.append(f"### {item['repo']}")
+            lines.append(f"- {release.get('reason') or 'release tag could not be calculated'}")
+            lines.append("")
 
     no_local_diff_items = [
         item
@@ -1292,6 +1433,8 @@ def main() -> int:
         f"{report['totals']['no_changes']} fully comparable repos have no changes, "
         f"{report['totals']['special']} repos are special cases, "
         f"{report['totals']['notifications']} repos have notification-only events, "
+        f"{report['totals'].get('planned_releases', 0)} repos have planned git tag releases, "
+        f"{report['totals'].get('release_blockers', 0)} repos have git tag release blockers, "
         f"{report['totals']['external_excluded']} external repos were excluded."
     )
     return 0

@@ -41,6 +41,12 @@ def event_counts(reports: list[dict[str, Any]], items: list[dict[str, Any]], wor
         "eol_updates": sum(1 for item in items if item.get("eol_updates")),
         "eol_alerts": sum(1 for item in items if item.get("eol_alerts")),
         "major_updates": sum(1 for item in items if item.get("major_updates")),
+        "planned_releases": sum(
+            1 for item in items if (item.get("planned_release") or {}).get("status") == "planned"
+        ),
+        "release_blockers": sum(
+            1 for item in items if (item.get("planned_release") or {}).get("status") == "blocked"
+        ),
         "warnings": sum(1 for item in items if item.get("warnings")),
         "special": sum(int((report.get("totals") or {}).get("special") or 0) for report in reports),
     }
@@ -79,6 +85,49 @@ def append_repo_diffs(lines: list[str], title: str, items: list[dict[str, Any]])
         lines.append("")
 
 
+def append_repo_releases(lines: list[str], items: list[dict[str, Any]]) -> None:
+    selected = [
+        (item, item.get("planned_release") or {})
+        for item in items
+        if (item.get("planned_release") or {}).get("status") == "planned"
+    ]
+    if not selected:
+        return
+
+    lines.append("Planned Git Tag Releases")
+    lines.append("")
+    lines.append("Dry run only: no git tags were created.")
+    lines.append("")
+    for item, release in selected:
+        lines.append(f"{item['repo']}:")
+        lines.append(f"- previous tag: {release['previous_tag']}")
+        lines.append(f"- new patch tag: {release['tag']}")
+        lines.append(f"- title: {release['title']}")
+        lines.append("- commands after applying and committing the manifest change:")
+        for command in release.get("commands") or []:
+            lines.append(f"  - {command}")
+        lines.append("description:")
+        lines.extend(str(release.get("description") or "").splitlines())
+        lines.append("")
+
+
+def append_release_blockers(lines: list[str], items: list[dict[str, Any]]) -> None:
+    selected = [
+        (item, item.get("planned_release") or {})
+        for item in items
+        if (item.get("planned_release") or {}).get("status") == "blocked"
+    ]
+    if not selected:
+        return
+
+    lines.append("Git Tag Release Blockers")
+    lines.append("")
+    for item, release in selected:
+        lines.append(f"{item['repo']}:")
+        lines.append(f"- {release.get('reason') or 'release tag could not be calculated'}")
+        lines.append("")
+
+
 def build_body(
     reports: list[dict[str, Any]],
     items: list[dict[str, Any]],
@@ -112,6 +161,8 @@ def build_body(
 
     append_repo_messages(lines, "Updates Needed", items, "updates")
     append_repo_diffs(lines, "Planned Manifest Diffs", items)
+    append_repo_releases(lines, items)
+    append_release_blockers(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
     append_repo_messages(lines, "EOL Field Updates", items, "eol_updates")
     append_repo_messages(lines, "EOL Alerts", items, "eol_alerts")
