@@ -57,7 +57,7 @@ README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a dry-run service update report.")
+    parser = argparse.ArgumentParser(description="Generate a service update report.")
     parser.add_argument("--readme", default="README.md", help="Path to the README that lists the service repos.")
     parser.add_argument("--owner", default="wodby", help="GitHub owner/org that owns the service repos.")
     parser.add_argument("--repo-filter", default="", help="Optional regex filter for repo names.")
@@ -246,12 +246,6 @@ def latest_matching_caret_tag(tags: set[str], base: Version) -> tuple[str, Versi
     return None
 
 
-def format_from_version_constraint(tag: str, current_constraint: str) -> str:
-    prefix = "^v" if current_constraint.strip().startswith("^v") else "^"
-    normalized_tag = tag[1:] if tag.startswith("v") else tag
-    return f"{prefix}{normalized_tag}"
-
-
 def label_prefix(change: dict[str, Any]) -> str:
     label = str(change.get("service_label") or "").strip()
     return f"{label}: " if label else ""
@@ -409,7 +403,7 @@ def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) ->
 
     for group in grouped.values():
         lines.append(f"- {group['repo']}:{group['tag']}")
-        lines.append("  Child constraints updated:")
+        lines.append("  Resolved parent versions updated:")
         for item in group["updates"]:
             lines.append(f"  - {item['file']}: {item['before']} -> {item['after']}")
         note = group.get("note")
@@ -437,11 +431,11 @@ def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[
     description = render_release_description(repo, previous_tag, next_tag, planned_changes)
     return {
         "status": "planned",
-            "reason": None,
-            "previous_tag": previous_tag,
-            "tag": next_tag,
-            "title": next_tag,
-            "description": description,
+        "reason": None,
+        "previous_tag": previous_tag,
+        "tag": next_tag,
+        "title": next_tag,
+        "description": description,
         "commands": [
             f"git tag -a {next_tag} -F release-notes.md",
             f"git push origin {next_tag}",
@@ -648,6 +642,7 @@ class UpdateReportGenerator:
     def check_parent_service_version(
         self,
         parent_name: str,
+        from_version_constraint: Any,
         from_version: Any,
         prefix: str,
         manifest_path: str,
@@ -656,21 +651,41 @@ class UpdateReportGenerator:
             "updates": [],
             "current": [],
             "warnings": [],
+            "notifications": [],
+            "major_updates": [],
             "planned_changes": [],
             "comparable": False,
         }
         parent_repo = self.service_name_to_repo(str(parent_name))
-        current_constraint = str(from_version or "").strip()
+        current_constraint = str(from_version_constraint or "").strip()
+        current_version = str(from_version or "").strip()
         if not current_constraint:
             result["warnings"].append(
-                f"{prefix}parent service `{parent_repo}` is set via `from`, but `fromVersion` is missing"
+                f"{prefix}parent service `{parent_repo}` is set via `from`, but `fromVersionConstraint` is missing"
+            )
+            return result
+        if not current_version:
+            result["warnings"].append(
+                f"{prefix}parent service `{parent_repo}` is set via `from`, but exact `fromVersion` is missing"
             )
             return result
 
         base_version = parse_caret_constraint(current_constraint)
         if base_version is None:
             result["warnings"].append(
-                f"{prefix}`fromVersion` `{current_constraint}` is not a supported caret semver constraint"
+                f"{prefix}`fromVersionConstraint` `{current_constraint}` is not a supported caret semver constraint"
+            )
+            return result
+
+        current_parsed = parse_version(current_version)
+        if current_parsed is None or current_parsed.is_prerelease:
+            result["warnings"].append(
+                f"{prefix}`fromVersion` `{current_version}` is not a supported stable semver tag"
+            )
+            return result
+        if not (base_version <= current_parsed < caret_upper_bound(base_version)):
+            result["warnings"].append(
+                f"{prefix}`fromVersion` `{current_version}` is outside `fromVersionConstraint` `{current_constraint}`"
             )
             return result
 
@@ -679,21 +694,32 @@ class UpdateReportGenerator:
         latest = latest_matching_caret_tag(tags, base_version)
         if latest is None:
             result["warnings"].append(
-                f"{prefix}no stable `{parent_repo}` git tag matched `fromVersion` `{current_constraint}`"
+                f"{prefix}no stable `{parent_repo}` git tag matched `fromVersionConstraint` `{current_constraint}`"
             )
             return result
 
         latest_tag, latest_version = latest
-        target_constraint = format_from_version_constraint(latest_tag, current_constraint)
-        if latest_version == base_version and target_constraint == current_constraint:
+        overall_latest = semver_tag_candidates(tags)
+        if overall_latest:
+            overall_version, overall_tag, _overall_prefix = overall_latest[0]
+            if overall_version >= caret_upper_bound(base_version):
+                message = (
+                    f"{prefix}new major parent service `{parent_repo}` tag `{overall_tag}` is available "
+                    f"outside `fromVersionConstraint` `{current_constraint}`; manual review required"
+                )
+                result["major_updates"].append(message)
+                result["notifications"].append(message)
+
+        if current_version == latest_tag:
             result["current"].append(
-                f"{prefix}parent service `{parent_repo}` latest compatible tag is current (`{current_constraint}`)"
+                f"{prefix}parent service `{parent_repo}` latest compatible tag is current "
+                f"(`{current_version}`, constraint: `{current_constraint}`)"
             )
             return result
 
         message = (
-            f"{prefix}updating parent service `{parent_repo}` to `{target_constraint}` "
-            f"(current: `{current_constraint}`, latest compatible tag: `{latest_tag}`)"
+            f"{prefix}updating parent service `{parent_repo}` from `{current_version}` to `{latest_tag}` "
+            f"(constraint: `{current_constraint}`)"
         )
         try:
             parent_change_notes = [self.build_wodby_tag_note_tree(parent_repo, latest_tag, None)]
@@ -713,13 +739,14 @@ class UpdateReportGenerator:
                 manifest_path,
                 "fromVersion",
                 "fromVersion",
-                current_constraint,
-                target_constraint,
+                current_version,
+                latest_tag,
                 message,
                 {
                     "change_type": "parent_service_version",
                     "parent_repo": parent_repo,
                     "parent_tag": latest_tag,
+                    "from_version_constraint": current_constraint,
                     "parent_change_notes": parent_change_notes,
                     "service_label": prefix.strip("[] ") if prefix else "",
                 },
@@ -1356,6 +1383,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
 
             repo_has_reportable_manifest = True
             parent_name = raw_service_data.get("from")
+            from_version_constraint = raw_service_data.get("fromVersionConstraint")
             from_version = raw_service_data.get("fromVersion")
             images = generator.get_service_images(service_data)
             image = images[0] if images else None
@@ -1384,11 +1412,13 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             if parent_name:
                 try:
                     parent_result = generator.check_parent_service_version(
-                        str(parent_name), from_version, prefix, manifest_path
+                        str(parent_name), from_version_constraint, from_version, prefix, manifest_path
                     )
                     updates.extend(parent_result["updates"])
                     current.extend(parent_result["current"])
                     warnings.extend(parent_result["warnings"])
+                    notifications.extend(parent_result["notifications"])
+                    major_updates.extend(parent_result["major_updates"])
                     planned_changes.extend(parent_result["planned_changes"])
                     comparable = comparable or bool(parent_result["comparable"])
                 except Exception as exc:
@@ -1663,6 +1693,10 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Repos with major-version notifications: {report['totals']['major_updates']}")
     lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
     lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
+    if "applied_updates" in report["totals"]:
+        lines.append(f"- Repos updated by workflow: {report['totals'].get('applied_updates', 0)}")
+    if "apply_failures" in report["totals"]:
+        lines.append(f"- Repos with update apply failures: {report['totals'].get('apply_failures', 0)}")
     lines.append("")
 
     planned_change_items = [
@@ -1671,15 +1705,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         if item.get("planned_diffs") or (item.get("planned_release") or {}).get("status") == "planned"
     ]
     if planned_change_items:
-        lines.append("## Planned Manifest Changes and Git Tags")
+        lines.append("## Manifest Changes and Git Tags")
         lines.append("")
-        lines.append("Dry run only: no git tags are created by this workflow.")
+        lines.append("The workflow applies these manifest changes and releases these git tags when the apply step succeeds.")
         lines.append("")
         for item in planned_change_items:
             release = item.get("planned_release") or {}
             lines.append(f"### {item['repo']}")
             if release.get("status") == "planned":
-                lines.append(f"- Tag to release: `{release['tag']}`")
+                lines.append(f"- Git tag: `{release['tag']}`")
                 lines.append(f"- Previous tag: `{release['previous_tag']}`")
                 lines.append("")
                 lines.append("Tag description:")
@@ -1693,6 +1727,29 @@ def render_markdown(report: dict[str, Any]) -> str:
                     lines.extend(str(planned_diff).splitlines())
                     lines.append("```")
                     lines.append("")
+            lines.append("")
+
+    apply_result_items = [
+        item for item in sorted(report["per_repo"], key=lambda value: value["repo"]) if item.get("apply_result")
+    ]
+    if apply_result_items:
+        lines.append("## Apply Results")
+        lines.append("")
+        for item in apply_result_items:
+            result = item["apply_result"]
+            lines.append(f"### {item['repo']}")
+            lines.append(f"- Status: `{result.get('status', 'unknown')}`")
+            if result.get("message"):
+                lines.append(f"- Message: {result['message']}")
+            if result.get("branch"):
+                lines.append(f"- Branch: `{result['branch']}`")
+            if result.get("commit"):
+                lines.append(f"- Commit: `{result['commit']}`")
+            if result.get("tag"):
+                lines.append(f"- Tag: `{result['tag']}`")
+            changed_files = result.get("changed_files") or []
+            if changed_files:
+                lines.append(f"- Changed files: {', '.join(f'`{path}`' for path in changed_files)}")
             lines.append("")
 
     blocked_release_items = [

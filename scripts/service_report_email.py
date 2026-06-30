@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-url", default="", help="GitHub Actions run URL.")
     parser.add_argument("--event", default="", help="GitHub Actions event name.")
     parser.add_argument("--sha", default="", help="Git commit SHA.")
-    parser.add_argument("--workflow-result", default="", help="Aggregated dry-run-report job result.")
+    parser.add_argument("--workflow-result", default="", help="Aggregated update job result.")
     return parser.parse_args()
 
 
@@ -46,6 +46,12 @@ def event_counts(reports: list[dict[str, Any]], items: list[dict[str, Any]], wor
         "release_blockers": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "blocked"
         ),
+        "applied_updates": sum(
+            1
+            for item in items
+            if (item.get("apply_result") or {}).get("status") in ("applied", "tagged", "already_applied")
+        ),
+        "apply_failures": sum(1 for item in items if (item.get("apply_result") or {}).get("status") == "failed"),
         "warnings": sum(1 for item in items if item.get("warnings")),
         "special": sum(int((report.get("totals") or {}).get("special") or 0) for report in reports),
     }
@@ -77,14 +83,14 @@ def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -
     if not selected:
         return
 
-    lines.append("Planned Manifest Changes and Git Tags")
+    lines.append("Manifest Changes and Git Tags")
     lines.append("")
-    lines.append("Dry run only: no git tags were created.")
+    lines.append("The workflow applies these manifest changes and releases these git tags when the apply step succeeds.")
     lines.append("")
     for item, release, planned_diffs in selected:
         lines.append(f"{item['repo']}:")
         if release.get("status") == "planned":
-            lines.append(f"- tag to release: {release['tag']}")
+            lines.append(f"- git tag: {release['tag']}")
             lines.append(f"- previous tag: {release['previous_tag']}")
             lines.append("tag description:")
             lines.extend(str(release.get("description") or "").splitlines())
@@ -94,6 +100,30 @@ def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -
             lines.append("manifest diff:")
             for planned_diff in planned_diffs:
                 lines.extend(str(planned_diff).rstrip().splitlines())
+        lines.append("")
+
+
+def append_repo_apply_results(lines: list[str], items: list[dict[str, Any]]) -> None:
+    selected = [(item, item.get("apply_result") or {}) for item in items if item.get("apply_result")]
+    if not selected:
+        return
+
+    lines.append("Apply Results")
+    lines.append("")
+    for item, result in selected:
+        lines.append(f"{item['repo']}:")
+        lines.append(f"- status: {result.get('status', 'unknown')}")
+        if result.get("message"):
+            lines.append(f"- message: {result['message']}")
+        if result.get("branch"):
+            lines.append(f"- branch: {result['branch']}")
+        if result.get("commit"):
+            lines.append(f"- commit: {result['commit']}")
+        if result.get("tag"):
+            lines.append(f"- tag: {result['tag']}")
+        changed_files = result.get("changed_files") or []
+        if changed_files:
+            lines.append(f"- changed files: {', '.join(changed_files)}")
         lines.append("")
 
 
@@ -113,7 +143,7 @@ def build_body(
     lines.append(f"Run: {run_url or 'unknown'}")
     lines.append(f"Event: {event or 'unknown'}")
     lines.append(f"Commit: {sha or 'unknown'}")
-    lines.append(f"Dry-run job result: {workflow_result or 'unknown'}")
+    lines.append(f"Update job result: {workflow_result or 'unknown'}")
     lines.append(f"Report artifacts: {len(reports)}")
     lines.append(f"Repos reported: {len(items)}")
     lines.append("")
@@ -129,6 +159,7 @@ def build_body(
         lines.append("")
 
     append_repo_planned_changes(lines, items)
+    append_repo_apply_results(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
     append_repo_messages(lines, "Manual Review Notifications", items, "notifications")
     append_repo_messages(lines, "Warnings", items, "warnings")
@@ -246,8 +277,9 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
 
     blocks = [
         "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
-        "Planned Manifest Changes and Git Tags</h2>",
-        "<p style=\"margin:0 0 12px 0;color:#4b5563;\">Dry run only: no git tags were created.</p>",
+        "Manifest Changes and Git Tags</h2>",
+        "<p style=\"margin:0 0 12px 0;color:#4b5563;\">"
+        "The workflow applies these manifest changes and releases these git tags when the apply step succeeds.</p>",
     ]
     for item, release, planned_diffs in selected:
         blocks.append(
@@ -258,7 +290,7 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
             blocks.append(
                 "<table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" "
                 "style=\"border-collapse:collapse;margin:0 0 12px 0;\">"
-                f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Tag to release</td>"
+                f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Git tag</td>"
                 f"<td style=\"padding:2px 0;color:#111827;\"><strong>{html.escape(str(release['tag']))}</strong></td></tr>"
                 f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Previous tag</td>"
                 f"<td style=\"padding:2px 0;color:#111827;\">{html.escape(str(release['previous_tag']))}</td></tr>"
@@ -282,6 +314,45 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
             for planned_diff in planned_diffs:
                 blocks.append(html_diff(str(planned_diff)))
         blocks.append("</div>")
+    return "".join(blocks)
+
+
+def html_apply_results(items: list[dict[str, Any]]) -> str:
+    selected = [(item, item.get("apply_result") or {}) for item in items if item.get("apply_result")]
+    if not selected:
+        return ""
+
+    blocks = [
+        "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">Apply Results</h2>"
+    ]
+    for item, result in selected:
+        status = str(result.get("status") or "unknown")
+        color = "#991b1b" if status == "failed" else "#166534"
+        rows = [
+            ("Status", f"<strong style=\"color:{color};\">{html.escape(status)}</strong>"),
+        ]
+        for key, label in (
+            ("message", "Message"),
+            ("branch", "Branch"),
+            ("commit", "Commit"),
+            ("tag", "Tag"),
+        ):
+            if result.get(key):
+                rows.append((label, html_inline_markdown(result[key])))
+        changed_files = result.get("changed_files") or []
+        if changed_files:
+            rows.append(("Changed files", html.escape(", ".join(changed_files))))
+        table_rows = "".join(
+            f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">{label}</td>"
+            f"<td style=\"padding:2px 0;color:#111827;\">{value}</td></tr>"
+            for label, value in rows
+        )
+        blocks.append(
+            "<div style=\"margin:0 0 14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:6px;\">"
+            f"<h3 style=\"margin:0 0 8px 0;font-size:16px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
+            f"<table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">{table_rows}</table>"
+            "</div>"
+        )
     return "".join(blocks)
 
 
@@ -318,7 +389,7 @@ def build_html_body(
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Run</td><td style=\"padding:2px 0;\">{run_value}</td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Event</td><td style=\"padding:2px 0;\">{html.escape(event or 'unknown')}</td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Commit</td><td style=\"padding:2px 0;\">{html.escape(sha or 'unknown')}</td></tr>",
-        f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Dry-run job result</td><td style=\"padding:2px 0;color:{status_color};\"><strong>{html.escape(workflow_result or 'unknown')}</strong></td></tr>",
+        f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Update job result</td><td style=\"padding:2px 0;color:{status_color};\"><strong>{html.escape(workflow_result or 'unknown')}</strong></td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Report artifacts</td><td style=\"padding:2px 0;\">{len(reports)}</td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Repos reported</td><td style=\"padding:2px 0;\">{len(items)}</td></tr>",
         "</table>",
@@ -334,6 +405,7 @@ def build_html_body(
             "</div>"
         )
     body.append(html_planned_changes(items))
+    body.append(html_apply_results(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
     body.append(html_repo_messages("Manual Review Notifications", items, "notifications"))
     body.append(html_repo_messages("Warnings", items, "warnings"))

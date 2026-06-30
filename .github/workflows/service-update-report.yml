@@ -1,4 +1,4 @@
-name: Service Update Report Dry Run
+name: Service Update
 
 on:
   push:
@@ -16,6 +16,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: service-update
+  cancel-in-progress: false
 
 jobs:
   discover-repos:
@@ -98,15 +102,15 @@ jobs:
           import os
 
           repos = json.loads(os.environ["REPOS_JSON"])
-          print("## Dry Run Scope")
+          print("## Update Scope")
           print("")
           print(f"- Selected repos: {os.environ['REPO_COUNT']}")
           for repo in repos:
               print(f"  - `{repo}`")
           PY
 
-  dry-run-report:
-    name: Dry Run Report / ${{ matrix.repo }}
+  update-report:
+    name: Update Service / ${{ matrix.repo }}
     needs: discover-repos
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -129,9 +133,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install Dependencies
-        run: python -m pip install --upgrade pip packaging pyyaml requests
+        run: python -m pip install --upgrade pip packaging pyyaml requests ruamel.yaml
 
-      - name: Generate Dry-Run Report
+      - name: Generate Service Update Report
         env:
           WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -149,7 +153,53 @@ jobs:
             --repo-filter "^${SERVICE_REPO}$" \
             --output-dir "$REPORT_DIR"
 
+      - name: Determine Apply Scope
+        id: apply-scope
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          repo = os.environ["SERVICE_REPO"]
+          report_dir = Path(os.environ["REPORT_DIR"])
+          report = json.loads((report_dir / "service-update-report.json").read_text())
+          details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
+          release = (details or {}).get("planned_release") or {}
+          planned_changes = (details or {}).get("planned_changes") or []
+          apply_needed = bool(planned_changes and release.get("status") == "planned")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
+              fh.write(f"apply_needed={str(apply_needed).lower()}\n")
+          print(f"apply_needed={apply_needed}")
+          PY
+
+      - name: Check Out Service Repository
+        if: steps.apply-scope.outputs.apply_needed == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: wodby/${{ matrix.repo }}
+          path: service-repo
+          fetch-depth: 0
+          token: ${{ secrets.WODBOT_GITHUB_PAT || secrets.WODBY_GITHUB_TOKEN || github.token }}
+
+      - name: Apply, Commit, Push, and Tag
+        if: steps.apply-scope.outputs.apply_needed == 'true'
+        env:
+          SERVICE_UPDATE_TOKEN: ${{ secrets.WODBOT_GITHUB_PAT || secrets.WODBY_GITHUB_TOKEN }}
+        run: |
+          if [[ -z "$SERVICE_UPDATE_TOKEN" ]]; then
+            echo "::error::WODBOT_GITHUB_PAT or WODBY_GITHUB_TOKEN is required to push service repo updates."
+            exit 1
+          fi
+
+          python scripts/service_apply_updates.py \
+            --report-dir "$REPORT_DIR" \
+            --owner wodby \
+            --repo "$SERVICE_REPO" \
+            --repo-dir service-repo
+
       - name: Print Full Report
+        if: always()
         run: |
           python - <<'PY'
           import os
@@ -171,9 +221,8 @@ jobs:
           report = json.loads((report_dir / "service-update-report.json").read_text())
           details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
 
-          print(f"## Dry Run Result: `{repo}`")
+          print(f"## Update Result: `{repo}`")
           print("")
-          print("- No service repos were modified by this workflow.")
           print("- Scope: single service repo")
           print("- Full report: printed in the `Print Full Report` step log")
           print("")
@@ -200,10 +249,9 @@ jobs:
 
           release = (details or {}).get("planned_release") or {}
           if release.get("status") == "planned" or (details and details.get("planned_diffs")):
-              print("### Planned Manifest Change and Git Tag")
-              print("- Dry run only: no git tag was created.")
+              print("### Manifest Change and Git Tag")
               if release.get("status") == "planned":
-                  print(f"- Tag to release: `{release['tag']}`")
+                  print(f"- Git tag: `{release['tag']}`")
                   print(f"- Previous tag: `{release['previous_tag']}`")
                   print("")
                   print("#### Tag Description")
@@ -219,6 +267,23 @@ jobs:
                       print(str(planned_diff).rstrip())
                       print("```")
                       print("")
+              print("")
+
+          apply_result = (details or {}).get("apply_result") or {}
+          if apply_result:
+              print("### Apply Result")
+              print(f"- Status: `{apply_result.get('status', 'unknown')}`")
+              if apply_result.get("message"):
+                  print(f"- Message: {apply_result['message']}")
+              if apply_result.get("branch"):
+                  print(f"- Branch: `{apply_result['branch']}`")
+              if apply_result.get("commit"):
+                  print(f"- Commit: `{apply_result['commit']}`")
+              if apply_result.get("tag"):
+                  print(f"- Tag: `{apply_result['tag']}`")
+              changed_files = apply_result.get("changed_files") or []
+              if changed_files:
+                  print(f"- Changed files: {', '.join(f'`{path}`' for path in changed_files)}")
               print("")
 
           if details and details.get("updates_without_local_diff"):
@@ -290,7 +355,7 @@ jobs:
     name: Notify Report Events
     needs:
       - discover-repos
-      - dry-run-report
+      - update-report
     if: always()
     runs-on: ubuntu-latest
 
@@ -319,4 +384,4 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --event "${{ github.event_name }}" \
             --sha "${{ github.sha }}" \
-            --workflow-result "${{ needs.dry-run-report.result }}"
+            --workflow-result "${{ needs.update-report.result }}"

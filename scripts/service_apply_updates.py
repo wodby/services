@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import ScalarString
+
+from service_update_report import render_markdown
+
+
+OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
+YAML_RT = YAML()
+YAML_RT.preserve_quotes = True
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Apply planned service update report changes to a service repo.")
+    parser.add_argument("--report-dir", required=True, help="Directory containing service-update-report.json.")
+    parser.add_argument("--repo", required=True, help="Service repository name, for example service-nginx.")
+    parser.add_argument("--repo-dir", required=True, help="Checked-out service repository directory.")
+    parser.add_argument("--owner", default="wodby", help="GitHub owner/org that owns the service repo.")
+    return parser.parse_args()
+
+
+def run_git(repo_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    process = subprocess.run(
+        ["git", *args],
+        cwd=repo_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if check and process.returncode != 0:
+        output = (process.stderr or process.stdout).strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {output}")
+    return process
+
+
+def normalize(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def replacement_value(current: Any, after: Any) -> Any:
+    if isinstance(current, ScalarString) and after is not None:
+        return type(current)(str(after))
+    return after
+
+
+def load_report(report_dir: Path) -> dict[str, Any]:
+    return json.loads((report_dir / "service-update-report.json").read_text())
+
+
+def write_report(report_dir: Path, report: dict[str, Any]) -> None:
+    apply_results = [
+        item.get("apply_result")
+        for item in report.get("per_repo") or []
+        if isinstance(item, dict) and isinstance(item.get("apply_result"), dict)
+    ]
+    report.setdefault("totals", {})["applied_updates"] = sum(
+        1 for result in apply_results if result.get("status") in ("applied", "tagged", "already_applied")
+    )
+    report.setdefault("totals", {})["apply_failures"] = sum(
+        1 for result in apply_results if result.get("status") == "failed"
+    )
+
+    (report_dir / "service-update-report.json").write_text(json.dumps(report, indent=2))
+    (report_dir / "service-update-report.md").write_text(render_markdown(report))
+
+
+def repo_item(report: dict[str, Any], repo: str) -> dict[str, Any]:
+    for item in report.get("per_repo") or []:
+        if isinstance(item, dict) and item.get("repo") == repo:
+            return item
+    raise RuntimeError(f"report does not contain per_repo details for {repo}")
+
+
+def ensure_branch(repo_dir: Path) -> str:
+    branch = run_git(repo_dir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch != "HEAD":
+        return branch
+
+    remote_head_process = run_git(repo_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
+    remote_head = remote_head_process.stdout.strip()
+    if remote_head.startswith("origin/"):
+        branch = remote_head.split("/", 1)[1]
+    else:
+        branch = ""
+        for candidate in ("master", "main"):
+            if run_git(repo_dir, "rev-parse", "--verify", f"refs/remotes/origin/{candidate}", check=False).returncode == 0:
+                branch = candidate
+                break
+        if not branch:
+            raise RuntimeError("unable to determine default branch from origin/HEAD, origin/master, or origin/main")
+    run_git(repo_dir, "checkout", "-B", branch, f"origin/{branch}")
+    return branch
+
+
+def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
+    path = str(change.get("path") or "")
+    key = str(change.get("key") or "")
+    expected_before = normalize(change.get("before"))
+    after = change.get("after")
+
+    if path == "fromVersion" and key == "fromVersion":
+        current = data.get("fromVersion")
+        if normalize(current) != expected_before:
+            raise RuntimeError(f"fromVersion changed since report generation: expected {expected_before}, found {current}")
+        data["fromVersion"] = replacement_value(current, after)
+        return
+
+    if path == "helm.version" and key == "version":
+        helm = data.get("helm")
+        if not isinstance(helm, dict):
+            raise RuntimeError("helm.version cannot be updated because helm is not a mapping")
+        current = helm.get("version")
+        if normalize(current) != expected_before:
+            raise RuntimeError(f"helm.version changed since report generation: expected {expected_before}, found {current}")
+        helm["version"] = replacement_value(current, after)
+        return
+
+    match = OPTION_PATH_RE.match(path)
+    if match and key == match.group("field"):
+        options = data.get("options")
+        if not isinstance(options, list):
+            raise RuntimeError(f"{path} cannot be updated because options is not a list")
+        wanted_version = match.group("version")
+        for option in options:
+            if isinstance(option, dict) and normalize(option.get("version")) == wanted_version:
+                current = option.get(key)
+                if normalize(current) != expected_before:
+                    raise RuntimeError(
+                        f"{path} changed since report generation: expected {expected_before}, found {current}"
+                    )
+                option[key] = replacement_value(current, after)
+                return
+        raise RuntimeError(f"{path} cannot be updated because version {wanted_version} was not found")
+
+    raise RuntimeError(f"unsupported planned change path: {path}")
+
+
+def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]) -> list[str]:
+    changed_files: list[str] = []
+    changes_by_file: dict[str, list[dict[str, Any]]] = {}
+    for change in planned_changes:
+        manifest_path = str(change.get("file") or "service.yml")
+        changes_by_file.setdefault(manifest_path, []).append(change)
+
+    for manifest_path, changes in changes_by_file.items():
+        path = repo_dir / manifest_path
+        if not path.is_file():
+            raise RuntimeError(f"{manifest_path} does not exist in the checked-out service repo")
+
+        data = YAML_RT.load(path.read_text()) or {}
+        if not isinstance(data, dict):
+            raise RuntimeError(f"{manifest_path} did not decode to a mapping")
+
+        for change in changes:
+            set_yaml_value(data, change)
+
+        with path.open("w") as fh:
+            YAML_RT.dump(data, fh)
+        changed_files.append(manifest_path)
+
+    return changed_files
+
+
+def remote_tag_exists(repo_dir: Path, tag: str) -> bool:
+    process = run_git(repo_dir, "ls-remote", "--tags", "--refs", "origin", tag, check=False)
+    if process.returncode != 0:
+        output = (process.stderr or process.stdout).strip()
+        raise RuntimeError(f"unable to check remote tag {tag}: {output}")
+    return bool(process.stdout.strip())
+
+
+def local_tag_exists(repo_dir: Path, tag: str) -> bool:
+    return run_git(repo_dir, "rev-parse", "--verify", f"refs/tags/{tag}", check=False).returncode == 0
+
+
+def configure_git_identity(repo_dir: Path) -> None:
+    name = os.environ.get("GIT_AUTHOR_NAME") or os.environ.get("GIT_COMMITTER_NAME")
+    email = os.environ.get("GIT_AUTHOR_EMAIL") or os.environ.get("GIT_COMMITTER_EMAIL")
+
+    if name:
+        run_git(repo_dir, "config", "user.name", name)
+    if email:
+        run_git(repo_dir, "config", "user.email", email)
+
+    configured_name = run_git(repo_dir, "config", "user.name", check=False).stdout.strip()
+    configured_email = run_git(repo_dir, "config", "user.email", check=False).stdout.strip()
+    if not configured_name or not configured_email:
+        raise RuntimeError(
+            "git user.name and user.email must be configured, or provided with "
+            "GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL"
+        )
+
+
+def commit_push_and_tag(
+    repo_dir: Path,
+    repo: str,
+    release: dict[str, Any],
+    changed_files: list[str],
+) -> dict[str, Any]:
+    branch = ensure_branch(repo_dir)
+    configure_git_identity(repo_dir)
+
+    run_git(repo_dir, "add", *changed_files)
+    has_diff = run_git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
+    tag = str(release["tag"])
+    tag_existed = remote_tag_exists(repo_dir, tag)
+
+    if tag_existed and has_diff:
+        raise RuntimeError(f"remote tag {tag} already exists; refusing to push a new commit without a release tag")
+
+    if has_diff:
+        commit_message = f"Update service manifest for {tag}"
+        run_git(repo_dir, "commit", "-m", commit_message)
+        commit_sha = run_git(repo_dir, "rev-parse", "HEAD").stdout.strip()
+        run_git(repo_dir, "push", "origin", f"HEAD:{branch}")
+        committed = True
+    else:
+        commit_sha = run_git(repo_dir, "rev-parse", "HEAD").stdout.strip()
+        committed = False
+
+    if tag_existed:
+        return {
+            "status": "already_applied",
+            "repo": repo,
+            "branch": branch,
+            "commit": commit_sha,
+            "tag": tag,
+            "changed_files": changed_files if committed else [],
+            "message": f"Remote tag {tag} already exists; no tag was created.",
+        }
+
+    if local_tag_exists(repo_dir, tag):
+        raise RuntimeError(f"local tag {tag} already exists but remote tag was not found")
+
+    description = str(release.get("description") or f"Release {tag}")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+        fh.write(description.rstrip() + "\n")
+        release_notes_path = fh.name
+
+    try:
+        run_git(repo_dir, "tag", "-a", tag, "-F", release_notes_path)
+        run_git(repo_dir, "push", "origin", tag)
+    finally:
+        Path(release_notes_path).unlink(missing_ok=True)
+
+    if committed:
+        status = "applied"
+        message = f"Committed manifest changes and pushed tag {tag}."
+    else:
+        status = "tagged"
+        message = f"No manifest diff remained; pushed tag {tag} on the current HEAD."
+
+    return {
+        "status": status,
+        "repo": repo,
+        "branch": branch,
+        "commit": commit_sha,
+        "tag": tag,
+        "changed_files": changed_files if committed else [],
+        "message": message,
+    }
+
+
+def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+    report_dir = Path(args.report_dir)
+    repo_dir = Path(args.repo_dir)
+    report = load_report(report_dir)
+    item = repo_item(report, args.repo)
+    planned_changes = item.get("planned_changes") or []
+    release = item.get("planned_release") or {}
+
+    if not planned_changes:
+        result = {"status": "skipped", "repo": args.repo, "message": "No planned manifest changes were found."}
+        item["apply_result"] = result
+        return report, result
+
+    if release.get("status") != "planned":
+        result = {
+            "status": "skipped",
+            "repo": args.repo,
+            "message": release.get("reason") or "No planned git tag release was found.",
+        }
+        item["apply_result"] = result
+        return report, result
+
+    changed_files = apply_manifest_changes(repo_dir, planned_changes)
+    result = commit_push_and_tag(repo_dir, args.repo, release, changed_files)
+    item["apply_result"] = result
+    return report, result
+
+
+def main() -> int:
+    args = parse_args()
+    report_dir = Path(args.report_dir)
+    try:
+        report, result = apply_updates(args)
+        write_report(report_dir, report)
+        print(result["message"])
+        print(json.dumps(result, indent=2))
+        return 0
+    except Exception as exc:
+        report = load_report(report_dir)
+        item = repo_item(report, args.repo)
+        result = {
+            "status": "failed",
+            "repo": args.repo,
+            "message": str(exc),
+        }
+        item["apply_result"] = result
+        write_report(report_dir, report)
+        print(f"Service update apply failed: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
