@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 import yaml
@@ -50,6 +50,9 @@ WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
+BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image stability tag updated to (?P<tag>\S+)", re.IGNORECASE)
+FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):", re.MULTILINE)
+README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
 
 
 def parse_args() -> argparse.Namespace:
@@ -142,8 +145,9 @@ def make_planned_change(
     before: Any,
     after: Any,
     description: str,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    change = {
         "file": manifest_path,
         "path": field_path,
         "key": key,
@@ -151,6 +155,9 @@ def make_planned_change(
         "after": normalize_change_value(after),
         "description": description,
     }
+    if extra:
+        change.update(extra)
+    return change
 
 
 def raw_options_by_version(raw_options: list[Any]) -> dict[str, dict[str, Any]]:
@@ -213,7 +220,7 @@ def render_release_description(
         f"Previous tag: {previous_tag}",
         f"New tag: {next_tag}",
         "",
-        "Changes:",
+        "Versions updated:",
     ]
     for change in planned_changes:
         file_path = str(change.get("file") or "service.yml")
@@ -221,7 +228,83 @@ def render_release_description(
         before = format_diff_value(change.get("before"))
         after = format_diff_value(change.get("after"))
         lines.append(f"- {file_path} {field_path}: {before} -> {after}")
+
+    image_note_blocks = render_image_change_notes(planned_changes)
+    if image_note_blocks:
+        lines.append("")
+        lines.append("Image changes:")
+        lines.extend(image_note_blocks)
     return "\n".join(lines)
+
+
+def render_tag_note(note: dict[str, Any], indent: int = 0) -> list[str]:
+    prefix = "  " * indent
+    repo = note.get("repo") or "unknown repo"
+    tag = note.get("tag") or "unknown tag"
+    lines = [f"{prefix}- {repo}:{tag}"]
+    lines.extend(render_tag_note_details(note, indent + 1))
+    return lines
+
+
+def render_tag_note_details(note: dict[str, Any], indent: int = 0) -> list[str]:
+    prefix = "  " * indent
+    lines: list[str] = []
+    message = str(note.get("message") or note.get("reason") or "").strip()
+    if message:
+        for message_line in message.splitlines():
+            lines.append(f"{prefix}{message_line}")
+    for child in note.get("base_changes") or []:
+        lines.extend(render_tag_note(child, indent))
+    return lines
+
+
+def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for change in planned_changes:
+        if change.get("change_type") != "image_tag":
+            continue
+        image = str(change.get("image") or "")
+        image_version = str(change.get("image_version") or "")
+        target = str(change.get("after") or "")
+        notes = change.get("image_change_notes") or []
+        note = notes[0] if notes else None
+        group_key = (
+            str(note.get("repo") or image) if note else image,
+            str(note.get("tag") or target) if note else target,
+        )
+        group = grouped.setdefault(
+            group_key,
+            {
+                "image": image,
+                "note": note,
+                "updates": [],
+            },
+        )
+        group["updates"].append(
+            {
+                "version": image_version,
+                "before": format_diff_value(change.get("before")),
+                "after": format_diff_value(change.get("after")),
+            }
+        )
+
+    for group in grouped.values():
+        note = group.get("note")
+        if note:
+            lines.append(f"- {note.get('repo')}:{note.get('tag')}")
+        else:
+            lines.append(f"- {group['image']}")
+        lines.append("  Versions updated:")
+        for item in group["updates"]:
+            lines.append(f"  - {item['version']}: {item['before']} -> {item['after']}")
+        if note:
+            lines.append("  Changes:")
+            lines.extend(render_tag_note_details(note, 2))
+        else:
+            lines.append("  Changes:")
+            lines.append("  - No image tag change notes were found.")
+    return lines
 
 
 def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -320,6 +403,10 @@ class UpdateReportGenerator:
             self.github_headers["Authorization"] = f"Bearer {token}"
         self._content_cache: dict[tuple[str, str, str], str | None] = {}
         self._github_tags_cache: dict[tuple[str, str], set[str]] = {}
+        self._github_tag_note_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+        self._ref_file_cache: dict[tuple[str, str, str], str | None] = {}
+        self._base_image_repo_cache: dict[tuple[str, str, str | None], str | None] = {}
+        self._image_change_notes_cache: dict[tuple[str, str | None, str, str | None], list[dict[str, Any]]] = {}
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
@@ -522,6 +609,187 @@ class UpdateReportGenerator:
 
         self._github_tags_cache[cache_key] = tags
         return tags
+
+    def get_github_tag_note(self, owner: str, repo: str, tag: str) -> dict[str, Any] | None:
+        cache_key = (owner, repo, tag)
+        if cache_key in self._github_tag_note_cache:
+            return self._github_tag_note_cache[cache_key]
+
+        encoded_tag = quote(tag, safe="")
+        url = f"https://api.github.com/repos/{owner}/{repo}/git/ref/tags/{encoded_tag}"
+        response = self.session.get(url, headers=self.github_headers, timeout=60)
+        if response.status_code == 404:
+            self._github_tag_note_cache[cache_key] = None
+            return None
+        response.raise_for_status()
+
+        ref_data = response.json()
+        ref_object = ref_data.get("object") or {}
+        note = {
+            "repo": f"{owner}/{repo}",
+            "tag": tag,
+            "message": "",
+            "url": f"https://github.com/{owner}/{repo}/releases/tag/{tag}",
+            "base_changes": [],
+        }
+        if ref_object.get("type") == "tag":
+            tag_response = self.session.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/tags/{ref_object['sha']}",
+                headers=self.github_headers,
+                timeout=60,
+            )
+            tag_response.raise_for_status()
+            tag_data = tag_response.json()
+            note["message"] = str(tag_data.get("message") or "").strip()
+        else:
+            note["message"] = "Tag is lightweight; no tag description was found."
+
+        self._github_tag_note_cache[cache_key] = note
+        return note
+
+    def get_repo_file_at_ref(self, repo: str, ref: str, path: str) -> str | None:
+        cache_key = (repo, ref, path)
+        if cache_key in self._ref_file_cache:
+            return self._ref_file_cache[cache_key]
+
+        url = f"https://raw.githubusercontent.com/{self.owner}/{repo}/{quote(ref, safe='')}/{path}"
+        response = self.session.get(url, timeout=60)
+        if response.status_code == 404:
+            self._ref_file_cache[cache_key] = None
+            return None
+        response.raise_for_status()
+        self._ref_file_cache[cache_key] = response.text
+        return response.text
+
+    def find_base_image_repo(self, repo: str, tag: str, image_version: str | None) -> str | None:
+        cache_key = (repo, tag, image_version)
+        if cache_key in self._base_image_repo_cache:
+            return self._base_image_repo_cache[cache_key]
+
+        dockerfile_paths = ["Dockerfile"]
+        if image_version:
+            image_major = image_version.split(".", 1)[0]
+            dockerfile_paths.extend([f"{image_version}/Dockerfile", f"{image_major}/Dockerfile"])
+
+        for path in dockerfile_paths:
+            dockerfile = self.get_repo_file_at_ref(repo, tag, path)
+            if not dockerfile:
+                continue
+            match = FROM_WODBY_IMAGE_RE.search(dockerfile)
+            if match:
+                base_repo = match.group("repo")
+                self._base_image_repo_cache[cache_key] = base_repo
+                return base_repo
+
+        readme = self.get_repo_file_at_ref(repo, tag, "README.md")
+        if readme:
+            match = README_BASE_IMAGE_RE.search(readme)
+            if match:
+                base_repo = match.group("repo")
+                self._base_image_repo_cache[cache_key] = base_repo
+                return base_repo
+
+        self._base_image_repo_cache[cache_key] = None
+        return None
+
+    def build_wodby_tag_note_tree(
+        self,
+        repo: str,
+        tag: str,
+        image_version: str | None,
+        *,
+        depth: int = 0,
+        seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> dict[str, Any]:
+        key = (repo, tag)
+        if key in seen:
+            return {
+                "repo": f"{self.owner}/{repo}",
+                "tag": tag,
+                "message": "Tag note traversal stopped because a base-image cycle was detected.",
+                "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{tag}",
+                "base_changes": [],
+            }
+
+        note = self.get_github_tag_note(self.owner, repo, tag)
+        if note is None:
+            return {
+                "repo": f"{self.owner}/{repo}",
+                "tag": tag,
+                "message": "Tag description was not found.",
+                "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{tag}",
+                "base_changes": [],
+            }
+
+        note = copy.deepcopy(note)
+        if depth >= 4:
+            return note
+
+        message = str(note.get("message") or "").strip()
+        match = BASE_IMAGE_UPDATE_RE.match(message)
+        if not match:
+            return note
+
+        base_repo = self.find_base_image_repo(repo, tag, image_version)
+        if base_repo is None:
+            note["base_changes"] = [
+                {
+                    "repo": "unknown base image",
+                    "tag": match.group("tag"),
+                    "message": f"Base image repo could not be resolved for wodby/{repo}:{tag}.",
+                    "url": "",
+                    "base_changes": [],
+                }
+            ]
+            return note
+
+        note["base_changes"] = [
+            self.build_wodby_tag_note_tree(
+                base_repo,
+                match.group("tag"),
+                None,
+                depth=depth + 1,
+                seen=seen | {key},
+            )
+        ]
+        return note
+
+    def get_image_change_notes(
+        self,
+        image: str,
+        previous_tag: str | None,
+        target_tag: str,
+        image_version: str | None,
+    ) -> list[dict[str, Any]]:
+        cache_key = (image, previous_tag, target_tag, image_version)
+        if cache_key in self._image_change_notes_cache:
+            return copy.deepcopy(self._image_change_notes_cache[cache_key])
+
+        if not image.startswith(f"{self.owner}/"):
+            self._image_change_notes_cache[cache_key] = []
+            return []
+
+        target_match = WODBY_TAG_RE.match(target_tag)
+        stability_tag = target_match.group("stability") if target_match else None
+        if stability_tag is None:
+            self._image_change_notes_cache[cache_key] = []
+            return []
+
+        repo = image.split("/", 1)[1]
+        try:
+            notes = [self.build_wodby_tag_note_tree(repo, stability_tag, image_version)]
+        except Exception as exc:
+            notes = [
+                {
+                    "repo": f"{self.owner}/{repo}",
+                    "tag": stability_tag,
+                    "message": f"Image tag change notes lookup failed: {exc}",
+                    "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{stability_tag}",
+                    "base_changes": [],
+                }
+            ]
+        self._image_change_notes_cache[cache_key] = copy.deepcopy(notes)
+        return notes
 
     def get_dockerhub_tags(self, repo: str) -> list[str]:
         cache_key = ("dockerhub", repo)
@@ -1064,6 +1332,17 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                         raw_option.get("tag"),
                                         target,
                                         message,
+                                        {
+                                            "change_type": "image_tag",
+                                            "image": image,
+                                            "image_version": wanted,
+                                            "image_change_notes": generator.get_image_change_notes(
+                                                image,
+                                                str(raw_option.get("tag") or configured) if configured else None,
+                                                target,
+                                                wanted,
+                                            ),
+                                        },
                                     )
                                 )
                             else:
