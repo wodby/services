@@ -252,26 +252,51 @@ def format_from_version_constraint(tag: str, current_constraint: str) -> str:
     return f"{prefix}{normalized_tag}"
 
 
+def label_prefix(change: dict[str, Any]) -> str:
+    label = str(change.get("service_label") or "").strip()
+    return f"{label}: " if label else ""
+
+
+def human_change_description(change: dict[str, Any]) -> str:
+    before = format_diff_value(change.get("display_before", change.get("before")))
+    after = format_diff_value(change.get("display_after", change.get("after")))
+    prefix = label_prefix(change)
+    change_type = change.get("change_type")
+
+    if change_type == "image_tag":
+        version = str(change.get("image_version") or "unknown")
+        return f"{prefix}Tag updated from `{before}` to `{after}` for version `{version}`."
+    if change_type == "helm_chart":
+        chart = str(change.get("helm_chart") or "chart")
+        return f"{prefix}Helm chart `{chart}` updated from `{before}` to `{after}`."
+    if change_type == "eol":
+        product = str(change.get("product_label") or "").strip()
+        version = str(change.get("version") or "unknown")
+        product_suffix = f" for {product}" if product else ""
+        return f"{prefix}EOL updated to `{after}`{product_suffix} version `{version}`."
+    if change_type == "parent_service_version":
+        parent_repo = str(change.get("parent_repo") or "parent service")
+        return f"{prefix}Parent service `{parent_repo}` updated from `{before}` to `{after}`."
+
+    field_path = str(change.get("path") or change.get("key") or "value")
+    return f"{prefix}`{field_path}` updated from `{before}` to `{after}`."
+
+
 def render_release_description(
-    repo: str,
+    _repo: str,
     previous_tag: str,
     next_tag: str,
     planned_changes: list[dict[str, Any]],
 ) -> str:
     lines = [
-        f"{repo} service update",
+        f"Release {next_tag}",
         "",
         f"Previous tag: {previous_tag}",
-        f"New tag: {next_tag}",
         "",
-        "Versions updated:",
+        "Changes:",
     ]
     for change in planned_changes:
-        file_path = str(change.get("file") or "service.yml")
-        field_path = str(change.get("path") or change.get("key") or "value")
-        before = format_diff_value(change.get("before"))
-        after = format_diff_value(change.get("after"))
-        lines.append(f"- {file_path} {field_path}: {before} -> {after}")
+        lines.append(f"- {human_change_description(change)}")
 
     image_note_blocks = render_image_change_notes(planned_changes)
     if image_note_blocks:
@@ -340,19 +365,14 @@ def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str
 
     for group in grouped.values():
         note = group.get("note")
-        if note:
-            lines.append(f"- {note.get('repo')}:{note.get('tag')}")
-        else:
-            lines.append(f"- {group['image']}")
+        if not note:
+            continue
+        lines.append(f"- {note.get('repo')}:{note.get('tag')}")
         lines.append("  Versions updated:")
         for item in group["updates"]:
             lines.append(f"  - {item['version']}: {item['before']} -> {item['after']}")
-        if note:
-            lines.append("  Changes:")
-            lines.extend(render_tag_note_details(note, 2))
-        else:
-            lines.append("  Changes:")
-            lines.append("  - No image tag change notes were found.")
+        lines.append("  Changes:")
+        lines.extend(render_tag_note_details(note, 2))
     return lines
 
 
@@ -392,12 +412,10 @@ def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) ->
         lines.append("  Child constraints updated:")
         for item in group["updates"]:
             lines.append(f"  - {item['file']}: {item['before']} -> {item['after']}")
-        lines.append("  Changes:")
         note = group.get("note")
         if note:
+            lines.append("  Changes:")
             lines.extend(render_tag_note_details(note, 2))
-        else:
-            lines.append("  - No parent service tag description was found.")
     return lines
 
 
@@ -419,11 +437,11 @@ def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[
     description = render_release_description(repo, previous_tag, next_tag, planned_changes)
     return {
         "status": "planned",
-        "reason": None,
-        "previous_tag": previous_tag,
-        "tag": next_tag,
-        "title": f"{repo} {next_tag}",
-        "description": description,
+            "reason": None,
+            "previous_tag": previous_tag,
+            "tag": next_tag,
+            "title": next_tag,
+            "description": description,
         "commands": [
             f"git tag -a {next_tag} -F release-notes.md",
             f"git push origin {next_tag}",
@@ -705,6 +723,7 @@ class UpdateReportGenerator:
                     "parent_repo": parent_repo,
                     "parent_tag": latest_tag,
                     "parent_change_notes": parent_change_notes,
+                    "service_label": prefix.strip("[] ") if prefix else "",
                 },
             )
         )
@@ -1197,6 +1216,12 @@ class UpdateReportGenerator:
                             current_manifest_eol,
                             target_eol,
                             message,
+                            {
+                                "change_type": "eol",
+                                "product_label": product_label,
+                                "version": version,
+                                "service_label": prefix.strip("[] ") if prefix else "",
+                            },
                         )
                     )
 
@@ -1446,6 +1471,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                             "change_type": "image_tag",
                                             "image": image,
                                             "image_version": wanted,
+                                            "service_label": label if multiple_manifests else "",
+                                            "display_before": configured,
                                             "image_change_notes": generator.get_image_change_notes(
                                                 image,
                                                 str(raw_option.get("tag") or configured) if configured else None,
@@ -1498,6 +1525,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                     raw_helm.get("version"),
                                     latest_chart,
                                     message,
+                                    {
+                                        "change_type": "helm_chart",
+                                        "helm_chart": helm_chart,
+                                        "service_label": label if multiple_manifests else "",
+                                    },
                                 )
                             )
                         else:
@@ -1660,44 +1692,34 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"- Warning: {message}")
         lines.append("")
 
-    planned_diff_items = [
-        item for item in sorted(report["per_repo"], key=lambda value: value["repo"]) if item.get("planned_diffs")
-    ]
-    if planned_diff_items:
-        lines.append("## Planned Manifest Diffs")
-        lines.append("")
-        for item in planned_diff_items:
-            lines.append(f"### {item['repo']}")
-            for planned_diff in item["planned_diffs"]:
-                lines.append("```diff")
-                lines.extend(str(planned_diff).splitlines())
-                lines.append("```")
-                lines.append("")
-
-    planned_release_items = [
+    planned_change_items = [
         item
         for item in sorted(report["per_repo"], key=lambda value: value["repo"])
-        if (item.get("planned_release") or {}).get("status") == "planned"
+        if item.get("planned_diffs") or (item.get("planned_release") or {}).get("status") == "planned"
     ]
-    if planned_release_items:
-        lines.append("## Planned Git Tag Releases")
+    if planned_change_items:
+        lines.append("## Planned Manifest Changes and Git Tags")
         lines.append("")
         lines.append("Dry run only: no git tags are created by this workflow.")
         lines.append("")
-        for item in planned_release_items:
-            release = item["planned_release"]
+        for item in planned_change_items:
+            release = item.get("planned_release") or {}
             lines.append(f"### {item['repo']}")
-            lines.append(f"- Previous tag: `{release['previous_tag']}`")
-            lines.append(f"- New patch tag: `{release['tag']}`")
-            lines.append(f"- Title: `{release['title']}`")
-            lines.append("- Commands after applying and committing the manifest change:")
-            for command in release.get("commands") or []:
-                lines.append(f"  - `{command}`")
-            lines.append("")
-            lines.append("Description:")
-            lines.append("```markdown")
-            lines.extend(str(release.get("description") or "").splitlines())
-            lines.append("```")
+            if release.get("status") == "planned":
+                lines.append(f"- Tag to release: `{release['tag']}`")
+                lines.append(f"- Previous tag: `{release['previous_tag']}`")
+                lines.append("")
+                lines.append("Tag description:")
+                lines.extend(str(release.get("description") or "").splitlines())
+                lines.append("")
+            if item.get("planned_diffs"):
+                lines.append("Manifest diff:")
+                lines.append("")
+                for planned_diff in item["planned_diffs"]:
+                    lines.append("```diff")
+                    lines.extend(str(planned_diff).splitlines())
+                    lines.append("```")
+                    lines.append("")
             lines.append("")
 
     blocked_release_items = [

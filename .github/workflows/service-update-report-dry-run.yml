@@ -204,33 +204,27 @@ jobs:
                   print(f"- {message}")
               print("")
 
-          if details and details.get("planned_diffs"):
-              print("### Planned Manifest Diffs")
-              for planned_diff in details["planned_diffs"]:
-                  print("```diff")
-                  print(str(planned_diff).rstrip())
-                  print("```")
-                  print("")
-
           release = (details or {}).get("planned_release") or {}
-          if release.get("status") == "planned":
-              print("### Planned Git Tag Release")
+          if release.get("status") == "planned" or (details and details.get("planned_diffs")):
+              print("### Planned Manifest Change and Git Tag")
               print("- Dry run only: no git tag was created.")
-              print(f"- Previous tag: `{release['previous_tag']}`")
-              print(f"- New patch tag: `{release['tag']}`")
-              print(f"- Title: `{release['title']}`")
-              print("- Commands after applying and committing the manifest change:")
-              for command in release.get("commands") or []:
-                  print(f"  - `{command}`")
-              print("")
-              print("Description:")
-              print("```markdown")
-              print(str(release.get("description") or "").rstrip())
-              print("```")
-              print("")
-          elif release.get("status") == "blocked":
-              print("### Git Tag Release Blocked")
-              print(f"- {release.get('reason') or 'release tag could not be calculated'}")
+              if release.get("status") == "planned":
+                  print(f"- Tag to release: `{release['tag']}`")
+                  print(f"- Previous tag: `{release['previous_tag']}`")
+                  print("")
+                  print("#### Tag Description")
+                  print(str(release.get("description") or "").rstrip())
+                  print("")
+              elif release.get("status") == "blocked":
+                  print(f"- Git tag release blocked: {release.get('reason') or 'release tag could not be calculated'}")
+                  print("")
+              if details and details.get("planned_diffs"):
+                  print("#### Manifest Diff")
+                  for planned_diff in details["planned_diffs"]:
+                      print("```diff")
+                      print(str(planned_diff).rstrip())
+                      print("```")
+                      print("")
               print("")
 
           if details and details.get("updates_without_local_diff"):
