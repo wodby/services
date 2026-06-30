@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -119,6 +119,70 @@ def normalize_service_key(value: str | None) -> str:
     return text.replace("_", "-")
 
 
+def normalize_change_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def format_diff_value(value: Any) -> str:
+    normalized = normalize_change_value(value)
+    return normalized if normalized is not None else "null"
+
+
+def make_planned_change(
+    manifest_path: str,
+    field_path: str,
+    key: str,
+    before: Any,
+    after: Any,
+    description: str,
+) -> dict[str, Any]:
+    return {
+        "file": manifest_path,
+        "path": field_path,
+        "key": key,
+        "before": normalize_change_value(before),
+        "after": normalize_change_value(after),
+        "description": description,
+    }
+
+
+def raw_options_by_version(raw_options: list[Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(option.get("version")): option
+        for option in raw_options
+        if isinstance(option, dict) and option.get("version") is not None
+    }
+
+
+def render_planned_diffs(planned_changes: list[dict[str, Any]]) -> list[str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for change in planned_changes:
+        manifest_path = str(change.get("file") or "service.yml")
+        grouped.setdefault(manifest_path, []).append(change)
+
+    diffs: list[str] = []
+    for manifest_path, changes in grouped.items():
+        lines = [
+            f"diff --git a/{manifest_path} b/{manifest_path}",
+            f"--- a/{manifest_path}",
+            f"+++ b/{manifest_path}",
+        ]
+        for change in changes:
+            key = str(change.get("key") or "value")
+            path = str(change.get("path") or key)
+            lines.append(f"@@ {path} @@")
+            lines.append(f"-{key}: {format_diff_value(change.get('before'))}")
+            lines.append(f"+{key}: {format_diff_value(change.get('after'))}")
+        diffs.append("\n".join(lines))
+    return diffs
+
+
 @dataclass
 class RepoResult:
     repo: str
@@ -138,6 +202,9 @@ class RepoResult:
     eol_updates: list[str]
     eol_alerts: list[str]
     major_updates: list[str]
+    planned_changes: list[dict[str, Any]]
+    planned_diffs: list[str]
+    updates_without_local_diff: list[str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,6 +225,9 @@ class RepoResult:
             "eol_updates": self.eol_updates,
             "eol_alerts": self.eol_alerts,
             "major_updates": self.major_updates,
+            "planned_changes": self.planned_changes,
+            "planned_diffs": self.planned_diffs,
+            "updates_without_local_diff": self.updates_without_local_diff,
         }
 
 
@@ -629,13 +699,15 @@ class UpdateReportGenerator:
         options: list[Any],
         raw_options: list[Any],
         prefix: str,
-    ) -> dict[str, list[str]]:
+        manifest_path: str,
+    ) -> dict[str, list[Any]]:
         result = {
             "updates": [],
             "alerts": [],
             "major_updates": [],
             "notifications": [],
             "warnings": [],
+            "planned_changes": [],
         }
         if not options:
             return result
@@ -649,11 +721,7 @@ class UpdateReportGenerator:
             return result
 
         product_label = str(product_data.get("label") or product_name)
-        updateable_options = {
-            str(option.get("version")): option
-            for option in raw_options
-            if isinstance(option, dict) and option.get("version") is not None
-        }
+        updateable_options = raw_options_by_version(raw_options)
         configured_versions = [
             str(option.get("version"))
             for option in options
@@ -674,11 +742,21 @@ class UpdateReportGenerator:
             eol_from = release.get("eolFrom")
             if isinstance(eol_from, str) and ISO_DATE_RE.match(eol_from):
                 raw_option = updateable_options.get(version)
-                current_eol = eol_date_from_manifest(raw_option.get("eol")) if raw_option is not None else None
+                current_manifest_eol = raw_option.get("eol") if raw_option is not None else None
+                current_eol = eol_date_from_manifest(current_manifest_eol) if raw_option is not None else None
                 target_eol = normalized_manifest_eol(eol_from)
                 if raw_option is not None and current_eol != eol_from:
-                    result["updates"].append(
-                        f"{prefix}updating `eol` to `{target_eol}` for {product_label} version `{version}`"
+                    message = f"{prefix}updating `eol` to `{target_eol}` for {product_label} version `{version}`"
+                    result["updates"].append(message)
+                    result["planned_changes"].append(
+                        make_planned_change(
+                            manifest_path,
+                            f"options[version={version}].eol",
+                            "eol",
+                            current_manifest_eol,
+                            target_eol,
+                            message,
+                        )
                     )
 
             if release.get("isEol") is True:
@@ -783,6 +861,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         eol_updates: list[str] = []
         eol_alerts: list[str] = []
         major_updates: list[str] = []
+        planned_changes: list[dict[str, Any]] = []
+        updates_without_local_diff: list[str] = []
         repo_expects_image = False
         repo_expects_helm = False
         repo_expects_options = False
@@ -826,7 +906,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             image = images[0] if images else None
             options = service_data.get("options") or []
             raw_options = raw_service_data.get("options") or []
+            raw_option_index = raw_options_by_version(raw_options)
             helm = service_data.get("helm") or None
+            raw_helm = raw_service_data.get("helm") or None
             helm_source = helm.get("source") if helm else None
             helm_chart = (helm.get("chart") or helm_source) if helm else None
             helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
@@ -845,13 +927,14 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             repo_missing_expected_options = repo_missing_expected_options or (expects_options and not options)
 
             try:
-                eol_result = generator.check_eol_options(repo, label, options, raw_options, prefix)
+                eol_result = generator.check_eol_options(repo, label, options, raw_options, prefix, manifest_path)
                 updates.extend(eol_result["updates"])
                 eol_updates.extend(eol_result["updates"])
                 eol_alerts.extend(eol_result["alerts"])
                 major_updates.extend(eol_result["major_updates"])
                 notifications.extend(eol_result["notifications"])
                 warnings.extend(eol_result["warnings"])
+                planned_changes.extend(eol_result["planned_changes"])
             except Exception as exc:
                 warnings.append(f"{prefix}endoflife.date lookup failed: {exc}")
 
@@ -894,9 +977,26 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         elif configured == target:
                             current.append(f"{prefix}tag `{configured}` is the latest published tag for version `{wanted}`")
                         else:
-                            updates.append(
+                            message = (
                                 f"{prefix}updating tag to `{target}` for version `{wanted}` (current: `{configured}`)"
                             )
+                            updates.append(message)
+                            raw_option = raw_option_index.get(wanted)
+                            if raw_option is not None:
+                                planned_changes.append(
+                                    make_planned_change(
+                                        manifest_path,
+                                        f"options[version={wanted}].tag",
+                                        "tag",
+                                        raw_option.get("tag"),
+                                        target,
+                                        message,
+                                    )
+                                )
+                            else:
+                                updates_without_local_diff.append(
+                                    f"{message}; no local `options` entry for version `{wanted}` in `{manifest_path}`"
+                                )
             elif image and not options:
                 if expects_options:
                     warnings.append(
@@ -923,9 +1023,25 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         major_updates.append(message)
                         notifications.append(message)
                     else:
-                        updates.append(
+                        message = (
                             f"{prefix}a new chart version is available `{latest_chart}` (current: `{helm_version}`)"
                         )
+                        updates.append(message)
+                        if isinstance(raw_helm, dict) and raw_helm.get("version") is not None:
+                            planned_changes.append(
+                                make_planned_change(
+                                    manifest_path,
+                                    "helm.version",
+                                    "version",
+                                    raw_helm.get("version"),
+                                    latest_chart,
+                                    message,
+                                )
+                            )
+                        else:
+                            updates_without_local_diff.append(
+                                f"{message}; no local `helm.version` field in `{manifest_path}`"
+                            )
                 except Exception as exc:
                     warnings.append(f"{prefix}helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
             elif expects_helm:
@@ -971,6 +1087,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 eol_updates=eol_updates,
                 eol_alerts=eol_alerts,
                 major_updates=major_updates,
+                planned_changes=planned_changes,
+                planned_diffs=render_planned_diffs(planned_changes),
+                updates_without_local_diff=updates_without_local_diff,
             )
         )
 
@@ -1050,6 +1169,34 @@ def render_markdown(report: dict[str, Any]) -> str:
         for message in repo_details["warnings"]:
             lines.append(f"- Warning: {message}")
         lines.append("")
+
+    planned_diff_items = [
+        item for item in sorted(report["per_repo"], key=lambda value: value["repo"]) if item.get("planned_diffs")
+    ]
+    if planned_diff_items:
+        lines.append("## Planned Manifest Diffs")
+        lines.append("")
+        for item in planned_diff_items:
+            lines.append(f"### {item['repo']}")
+            for planned_diff in item["planned_diffs"]:
+                lines.append("```diff")
+                lines.extend(str(planned_diff).splitlines())
+                lines.append("```")
+                lines.append("")
+
+    no_local_diff_items = [
+        item
+        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+        if item.get("updates_without_local_diff")
+    ]
+    if no_local_diff_items:
+        lines.append("## Updates Without Local Manifest Diff")
+        lines.append("")
+        for item in no_local_diff_items:
+            lines.append(f"### {item['repo']}")
+            for message in item["updates_without_local_diff"]:
+                lines.append(f"- {message}")
+            lines.append("")
 
     lines.append("## Notification-Only Events")
     lines.append("")

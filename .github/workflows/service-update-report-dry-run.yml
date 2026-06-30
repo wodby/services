@@ -204,6 +204,20 @@ jobs:
                   print(f"- {message}")
               print("")
 
+          if details and details.get("planned_diffs"):
+              print("### Planned Manifest Diffs")
+              for planned_diff in details["planned_diffs"]:
+                  print("```diff")
+                  print(str(planned_diff).rstrip())
+                  print("```")
+                  print("")
+
+          if details and details.get("updates_without_local_diff"):
+              print("### Updates Without Local Manifest Diff")
+              for message in details["updates_without_local_diff"]:
+                  print(f"- {message}")
+              print("")
+
           if details and details["current"]:
               print("### Current State")
               for message in details["current"]:

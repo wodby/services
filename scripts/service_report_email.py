@@ -63,6 +63,22 @@ def append_repo_messages(lines: list[str], title: str, items: list[dict[str, Any
         lines.append("")
 
 
+def append_repo_diffs(lines: list[str], title: str, items: list[dict[str, Any]]) -> None:
+    selected = [(item, item.get("planned_diffs") or []) for item in items if item.get("planned_diffs")]
+    if not selected:
+        return
+
+    lines.append(title)
+    lines.append("")
+    for item, planned_diffs in selected:
+        lines.append(f"{item['repo']}:")
+        for planned_diff in planned_diffs:
+            lines.append("```diff")
+            lines.extend(str(planned_diff).rstrip().splitlines())
+            lines.append("```")
+        lines.append("")
+
+
 def build_body(
     reports: list[dict[str, Any]],
     items: list[dict[str, Any]],
@@ -95,6 +111,8 @@ def build_body(
         lines.append("")
 
     append_repo_messages(lines, "Updates Needed", items, "updates")
+    append_repo_diffs(lines, "Planned Manifest Diffs", items)
+    append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
     append_repo_messages(lines, "EOL Field Updates", items, "eol_updates")
     append_repo_messages(lines, "EOL Alerts", items, "eol_alerts")
     append_repo_messages(lines, "Major Version Notifications", items, "major_updates")
