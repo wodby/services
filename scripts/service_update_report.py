@@ -466,7 +466,6 @@ class RepoResult:
     warnings: list[str]
     notifications: list[str]
     eol_updates: list[str]
-    eol_alerts: list[str]
     major_updates: list[str]
     planned_changes: list[dict[str, Any]]
     planned_diffs: list[str]
@@ -490,7 +489,6 @@ class RepoResult:
             "warnings": self.warnings,
             "notifications": self.notifications,
             "eol_updates": self.eol_updates,
-            "eol_alerts": self.eol_alerts,
             "major_updates": self.major_updates,
             "planned_changes": self.planned_changes,
             "planned_diffs": self.planned_diffs,
@@ -562,7 +560,7 @@ class UpdateReportGenerator:
             return self._content_cache[cache_key]
         url = GITHUB_CONTENTS_URL.format(owner=self.owner, repo=repo, path=path)
         response = self.session.get(url, headers=self.github_headers, timeout=60)
-        if response.status_code in (403, 404):
+        if response.status_code in (401, 403, 404):
             content = self.get_raw_repo_file(repo, path)
             self._content_cache[cache_key] = content
             return content
@@ -1163,7 +1161,6 @@ class UpdateReportGenerator:
     ) -> dict[str, list[Any]]:
         result = {
             "updates": [],
-            "alerts": [],
             "major_updates": [],
             "notifications": [],
             "warnings": [],
@@ -1224,10 +1221,6 @@ class UpdateReportGenerator:
                             },
                         )
                     )
-
-            if release.get("isEol") is True:
-                eol_label = eol_from if isinstance(eol_from, str) and eol_from else "an unknown date"
-                result["alerts"].append(f"{prefix}{product_label} version `{version}` is EOL since {eol_label}")
 
         configured_majors = [major_version(version) for version in configured_versions]
         configured_majors = [value for value in configured_majors if value is not None]
@@ -1325,7 +1318,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         warnings: list[str] = []
         notifications: list[str] = []
         eol_updates: list[str] = []
-        eol_alerts: list[str] = []
         major_updates: list[str] = []
         planned_changes: list[dict[str, Any]] = []
         updates_without_local_diff: list[str] = []
@@ -1406,7 +1398,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 eol_result = generator.check_eol_options(repo, label, options, raw_options, prefix, manifest_path)
                 updates.extend(eol_result["updates"])
                 eol_updates.extend(eol_result["updates"])
-                eol_alerts.extend(eol_result["alerts"])
                 major_updates.extend(eol_result["major_updates"])
                 notifications.extend(eol_result["notifications"])
                 warnings.extend(eol_result["warnings"])
@@ -1594,7 +1585,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 warnings=warnings,
                 notifications=notifications,
                 eol_updates=eol_updates,
-                eol_alerts=eol_alerts,
                 major_updates=major_updates,
                 planned_changes=planned_changes,
                 planned_diffs=render_planned_diffs(planned_changes),
@@ -1610,7 +1600,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         if not result.updates
         and not result.warnings
         and not result.notifications
-        and not result.eol_alerts
         and result.current
         and result.comparable
     ]
@@ -1632,7 +1621,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             "special": len(special_section) + len(missing_service_yml),
             "notifications": sum(1 for result in results if result.notifications),
             "eol_updates": sum(1 for result in results if result.eol_updates),
-            "eol_alerts": sum(1 for result in results if result.eol_alerts),
             "major_updates": sum(1 for result in results if result.major_updates),
             "planned_releases": sum(
                 1
@@ -1671,26 +1659,11 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Repos needing updates: {report['totals']['updates']}")
     lines.append(f"- Fully comparable repos with no changes: {report['totals']['no_changes']}")
     lines.append(f"- Special-case repos: {report['totals']['special']}")
-    lines.append(f"- Repos with notification-only events: {report['totals']['notifications']}")
-    lines.append(f"- Repos with EOL field updates: {report['totals']['eol_updates']}")
-    lines.append(f"- Repos with EOL alerts: {report['totals']['eol_alerts']}")
+    lines.append(f"- Repos with manual-review notifications: {report['totals']['notifications']}")
     lines.append(f"- Repos with major-version notifications: {report['totals']['major_updates']}")
     lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
     lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
     lines.append("")
-
-    lines.append("## Updates Needed")
-    lines.append("")
-    for repo in sorted(report["updates"]):
-        lines.append(f"### {repo}")
-        for message in report["updates"][repo]:
-            lines.append(f"- {message}")
-        repo_details = next(item for item in report["per_repo"] if item["repo"] == repo)
-        for message in repo_details["current"]:
-            lines.append(f"- No change: {message}")
-        for message in repo_details["warnings"]:
-            lines.append(f"- Warning: {message}")
-        lines.append("")
 
     planned_change_items = [
         item
@@ -1750,27 +1723,29 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines.append(f"- {message}")
             lines.append("")
 
-    lines.append("## Notification-Only Events")
-    lines.append("")
-    for item in sorted(report["per_repo"], key=lambda value: value["repo"]):
-        messages = item.get("notifications") or []
-        if not messages:
-            continue
-        lines.append(f"### {item['repo']}")
-        for message in messages:
-            lines.append(f"- {message}")
+    notification_items = [
+        item for item in sorted(report["per_repo"], key=lambda value: value["repo"]) if item.get("notifications")
+    ]
+    if notification_items:
+        lines.append("## Manual Review Notifications")
         lines.append("")
+        for item in notification_items:
+            lines.append(f"### {item['repo']}")
+            for message in item["notifications"]:
+                lines.append(f"- {message}")
+            lines.append("")
 
-    lines.append("## EOL Alerts")
-    lines.append("")
-    for item in sorted(report["per_repo"], key=lambda value: value["repo"]):
-        messages = item.get("eol_alerts") or []
-        if not messages:
-            continue
-        lines.append(f"### {item['repo']}")
-        for message in messages:
-            lines.append(f"- {message}")
+    warning_items = [
+        item for item in sorted(report["per_repo"], key=lambda value: value["repo"]) if item.get("warnings")
+    ]
+    if warning_items:
+        lines.append("## Warnings")
         lines.append("")
+        for item in warning_items:
+            lines.append(f"### {item['repo']}")
+            for message in item["warnings"]:
+                lines.append(f"- {message}")
+            lines.append("")
 
     lines.append("## No Changes")
     lines.append("")
@@ -1843,7 +1818,7 @@ def main() -> int:
         f"{report['totals']['updates']} repos need updates, "
         f"{report['totals']['no_changes']} fully comparable repos have no changes, "
         f"{report['totals']['special']} repos are special cases, "
-        f"{report['totals']['notifications']} repos have notification-only events, "
+        f"{report['totals']['notifications']} repos have manual-review notifications, "
         f"{report['totals'].get('planned_releases', 0)} repos have planned git tag releases, "
         f"{report['totals'].get('release_blockers', 0)} repos have git tag release blockers, "
         f"{report['totals']['external_excluded']} external repos were excluded."

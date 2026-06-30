@@ -182,10 +182,10 @@ jobs:
               print("- Status: external service excluded")
           elif repo in report["missing_service_yml"]:
               print("- Status: missing `service.yml`")
-          elif details and details["updates"]:
+          elif details and (details.get("planned_diffs") or details["updates"]):
               print("- Status: update candidate")
-          elif details and (details.get("notifications") or details.get("eol_alerts")):
-              print("- Status: notification-only event")
+          elif details and details.get("notifications"):
+              print("- Status: manual review notification")
           elif details and (
               details["warnings"]
               or not details.get("comparable", False)
@@ -197,12 +197,6 @@ jobs:
           else:
               print("- Status: no changes")
           print("")
-
-          if details and details["updates"]:
-              print("### Updates Needed")
-              for message in details["updates"]:
-                  print(f"- {message}")
-              print("")
 
           release = (details or {}).get("planned_release") or {}
           if release.get("status") == "planned" or (details and details.get("planned_diffs")):
@@ -246,14 +240,8 @@ jobs:
               print("")
 
           if details and details.get("notifications"):
-              print("### Notification-Only Events")
+              print("### Manual Review Notifications")
               for message in details["notifications"]:
-                  print(f"- {message}")
-              print("")
-
-          if details and details.get("eol_alerts"):
-              print("### EOL Alerts")
-              for message in details["eol_alerts"]:
                   print(f"- {message}")
               print("")
 

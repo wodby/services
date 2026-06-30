@@ -39,8 +39,6 @@ def event_counts(reports: list[dict[str, Any]], items: list[dict[str, Any]], wor
     return {
         "workflow_failures": 0 if workflow_result in ("", "success") else 1,
         "updates": sum(1 for item in items if item.get("updates")),
-        "eol_updates": sum(1 for item in items if item.get("eol_updates")),
-        "eol_alerts": sum(1 for item in items if item.get("eol_alerts")),
         "major_updates": sum(1 for item in items if item.get("major_updates")),
         "planned_releases": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "planned"
@@ -130,12 +128,9 @@ def build_body(
         lines.append("One or more report jobs did not complete successfully. Check the run URL above.")
         lines.append("")
 
-    append_repo_messages(lines, "Updates Needed", items, "updates")
     append_repo_planned_changes(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
-    append_repo_messages(lines, "EOL Field Updates", items, "eol_updates")
-    append_repo_messages(lines, "EOL Alerts", items, "eol_alerts")
-    append_repo_messages(lines, "Major Version Notifications", items, "major_updates")
+    append_repo_messages(lines, "Manual Review Notifications", items, "notifications")
     append_repo_messages(lines, "Warnings", items, "warnings")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -338,12 +333,9 @@ def build_html_body(
             "<strong>Workflow Failure</strong><br>One or more report jobs did not complete successfully. Check the run URL above."
             "</div>"
         )
-    body.append(html_repo_messages("Updates Needed", items, "updates"))
     body.append(html_planned_changes(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
-    body.append(html_repo_messages("EOL Field Updates", items, "eol_updates"))
-    body.append(html_repo_messages("EOL Alerts", items, "eol_alerts"))
-    body.append(html_repo_messages("Major Version Notifications", items, "major_updates"))
+    body.append(html_repo_messages("Manual Review Notifications", items, "notifications"))
     body.append(html_repo_messages("Warnings", items, "warnings"))
     body.append("</div></body></html>")
     return "".join(body)
@@ -355,7 +347,6 @@ def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str
     return (
         f"[services] report {status}: "
         f"{counts['updates']} update repos, "
-        f"{counts['eol_alerts']} EOL alert repos, "
         f"{counts['major_updates']} major-version repos ({short_sha})"
     )
 
