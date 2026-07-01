@@ -13,7 +13,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
-from service_update_report import latest_stable_semver_tag, render_markdown
+from service_update_report import UpdateReportGenerator, latest_stable_semver_tag, render_markdown
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
@@ -260,6 +260,31 @@ def validate_planned_release(repo_dir: Path, release: dict[str, Any]) -> None:
         )
 
 
+def validate_planned_image_tags(
+    owner: str,
+    planned_changes: list[dict[str, Any]],
+    generator: UpdateReportGenerator | None = None,
+) -> None:
+    image_changes = [
+        change
+        for change in planned_changes
+        if isinstance(change, dict) and change.get("change_type") == "image_tag"
+    ]
+    if not image_changes:
+        return
+
+    tag_source = generator or UpdateReportGenerator(owner)
+    for change in image_changes:
+        image = normalize(change.get("image"))
+        tag = normalize(change.get("after"))
+        if not image or not tag:
+            raise RuntimeError("planned image tag change must include image and target tag")
+
+        published_tags = set(tag_source.get_image_tags(image))
+        if tag not in published_tags:
+            raise RuntimeError(f"planned image tag `{tag}` was not found for image `{image}`")
+
+
 def configure_git_identity(repo_dir: Path) -> None:
     name = os.environ.get("GIT_AUTHOR_NAME") or os.environ.get("GIT_COMMITTER_NAME")
     email = os.environ.get("GIT_AUTHOR_EMAIL") or os.environ.get("GIT_COMMITTER_EMAIL")
@@ -382,6 +407,7 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
 
     branch = prepare_repo_for_apply(repo_dir)
     validate_planned_release(repo_dir, release)
+    validate_planned_image_tags(args.owner, planned_changes)
     changed_files = apply_manifest_changes(repo_dir, planned_changes)
     result = commit_push_and_tag(repo_dir, args.repo, branch, release, changed_files)
     item["apply_result"] = result
