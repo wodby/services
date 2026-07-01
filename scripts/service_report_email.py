@@ -12,6 +12,18 @@ from typing import Any
 
 
 SUCCESSFUL_WORKFLOW_RESULTS = {"success", "skipped"}
+NOTIFICATION_GROUP_ORDER = [
+    "major_version",
+    "helm_major_version",
+    "missing_version_source",
+    "missing_eol",
+]
+NOTIFICATION_GROUP_TITLES = {
+    "major_version": "New Major Version Detected",
+    "helm_major_version": "New Helm Major Version Detected",
+    "missing_version_source": "No Source for Version Checks Found",
+    "missing_eol": "No EOL Could Be Found",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +67,18 @@ def event_counts(reports: list[dict[str, Any]], items: list[dict[str, Any]], wor
     return {
         "workflow_failures": 1 if workflow_result_failed(workflow_result) else 0,
         "updates": sum(1 for item in items if item.get("updates")),
-        "major_updates": sum(1 for item in items if item.get("major_updates")),
+        "major_version_notifications": sum(
+            1 for item in items if (item.get("notification_groups") or {}).get("major_version")
+        ),
+        "helm_major_version_notifications": sum(
+            1 for item in items if (item.get("notification_groups") or {}).get("helm_major_version")
+        ),
+        "missing_version_source_notifications": sum(
+            1 for item in items if (item.get("notification_groups") or {}).get("missing_version_source")
+        ),
+        "missing_eol_notifications": sum(
+            1 for item in items if (item.get("notification_groups") or {}).get("missing_eol")
+        ),
         "planned_releases": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "planned"
         ),
@@ -88,6 +111,44 @@ def append_repo_messages(lines: list[str], title: str, items: list[dict[str, Any
         for message in messages:
             lines.append(f"- {message}")
         lines.append("")
+
+
+def append_grouped_notifications(lines: list[str], items: list[dict[str, Any]]) -> None:
+    for group in NOTIFICATION_GROUP_ORDER:
+        selected = [
+            (item, (item.get("notification_groups") or {}).get(group) or [])
+            for item in items
+            if (item.get("notification_groups") or {}).get(group)
+        ]
+        if not selected:
+            continue
+        lines.append(NOTIFICATION_GROUP_TITLES[group])
+        lines.append("")
+        for item, messages in selected:
+            lines.append(f"{item['repo']}:")
+            for message in messages:
+                lines.append(f"- {message}")
+            lines.append("")
+
+    other_selected = []
+    for item in items:
+        grouped_messages = {
+            message
+            for messages in (item.get("notification_groups") or {}).values()
+            for message in messages
+        }
+        messages = [message for message in item.get("notifications") or [] if message not in grouped_messages]
+        if messages:
+            other_selected.append((item, messages))
+
+    if other_selected:
+        lines.append("Other Manual Review Notifications")
+        lines.append("")
+        for item, messages in other_selected:
+            lines.append(f"{item['repo']}:")
+            for message in messages:
+                lines.append(f"- {message}")
+            lines.append("")
 
 
 def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -> None:
@@ -177,7 +238,7 @@ def build_body(
     append_repo_planned_changes(lines, items)
     append_repo_apply_results(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
-    append_repo_messages(lines, "Manual Review Notifications", items, "notifications")
+    append_grouped_notifications(lines, items)
     append_repo_messages(lines, "Warnings", items, "warnings")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -279,6 +340,55 @@ def html_repo_messages(title: str, items: list[dict[str, Any]], key: str) -> str
             f"{html_message_list(messages)}"
             "</div>"
         )
+    return "".join(blocks)
+
+
+def html_grouped_notifications(items: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    for group in NOTIFICATION_GROUP_ORDER:
+        selected = [
+            (item, (item.get("notification_groups") or {}).get(group) or [])
+            for item in items
+            if (item.get("notification_groups") or {}).get(group)
+        ]
+        if not selected:
+            continue
+        blocks.append(
+            f"<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
+            f"{html.escape(NOTIFICATION_GROUP_TITLES[group])}</h2>"
+        )
+        for item, messages in selected:
+            blocks.append(
+                "<div style=\"margin:0 0 14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:6px;\">"
+                f"<h3 style=\"margin:0;font-size:16px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
+                f"{html_message_list(messages)}"
+                "</div>"
+            )
+
+    other_selected = []
+    for item in items:
+        grouped_messages = {
+            message
+            for messages in (item.get("notification_groups") or {}).values()
+            for message in messages
+        }
+        messages = [message for message in item.get("notifications") or [] if message not in grouped_messages]
+        if messages:
+            other_selected.append((item, messages))
+
+    if other_selected:
+        blocks.append(
+            "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
+            "Other Manual Review Notifications</h2>"
+        )
+        for item, messages in other_selected:
+            blocks.append(
+                "<div style=\"margin:0 0 14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:6px;\">"
+                f"<h3 style=\"margin:0;font-size:16px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
+                f"{html_message_list(messages)}"
+                "</div>"
+            )
+
     return "".join(blocks)
 
 
@@ -423,7 +533,7 @@ def build_html_body(
     body.append(html_planned_changes(items))
     body.append(html_apply_results(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
-    body.append(html_repo_messages("Manual Review Notifications", items, "notifications"))
+    body.append(html_grouped_notifications(items))
     body.append(html_repo_messages("Warnings", items, "warnings"))
     body.append("</div></body></html>")
     return "".join(body)
@@ -435,7 +545,8 @@ def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str
     return (
         f"[services] report {status}: "
         f"{counts['updates']} update repos, "
-        f"{counts['major_updates']} major-version repos ({short_sha})"
+        f"{counts['major_version_notifications']} major-version repos, "
+        f"{counts['helm_major_version_notifications']} Helm-major repos ({short_sha})"
     )
 
 

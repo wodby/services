@@ -138,6 +138,47 @@ README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-
 SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+){0,2})(?:p(?P<portable>\d+))?$")
 TAILSCALE_STABLE_OPTION_RE = re.compile(r'<option value="(?P<version>\d+\.\d+\.\d+)"')
 
+NOTIFICATION_GROUP_ORDER = [
+    "major_version",
+    "helm_major_version",
+    "missing_version_source",
+    "missing_eol",
+]
+NOTIFICATION_GROUP_TITLES = {
+    "major_version": "New Major Version Detected",
+    "helm_major_version": "New Helm Major Version Detected",
+    "missing_version_source": "No Source for Version Checks Found",
+    "missing_eol": "No EOL Could Be Found",
+}
+
+
+def empty_notification_groups() -> dict[str, list[str]]:
+    return {group: [] for group in NOTIFICATION_GROUP_ORDER}
+
+
+def compact_notification_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {group: messages for group, messages in groups.items() if messages}
+
+
+def add_grouped_notification(result: dict[str, Any], group: str, message: str) -> None:
+    result.setdefault("notifications", []).append(message)
+    result.setdefault("notification_groups", {}).setdefault(group, []).append(message)
+
+
+def merge_notification_groups(target: dict[str, list[str]], source: dict[str, list[str]] | None) -> None:
+    for group, messages in (source or {}).items():
+        target.setdefault(group, []).extend(messages)
+
+
+def add_repo_notification(
+    notifications: list[str],
+    notification_groups: dict[str, list[str]],
+    group: str,
+    message: str,
+) -> None:
+    notifications.append(message)
+    notification_groups.setdefault(group, []).append(message)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a service update report.")
@@ -603,6 +644,7 @@ class RepoResult:
     current: list[str]
     warnings: list[str]
     notifications: list[str]
+    notification_groups: dict[str, list[str]]
     eol_updates: list[str]
     major_updates: list[str]
     planned_changes: list[dict[str, Any]]
@@ -626,6 +668,7 @@ class RepoResult:
             "current": self.current,
             "warnings": self.warnings,
             "notifications": self.notifications,
+            "notification_groups": compact_notification_groups(self.notification_groups),
             "eol_updates": self.eol_updates,
             "major_updates": self.major_updates,
             "planned_changes": self.planned_changes,
@@ -796,6 +839,7 @@ class UpdateReportGenerator:
             "current": [],
             "warnings": [],
             "notifications": [],
+            "notification_groups": empty_notification_groups(),
             "major_updates": [],
             "planned_changes": [],
             "comparable": False,
@@ -852,7 +896,7 @@ class UpdateReportGenerator:
                     f"outside `fromVersionConstraint` `{current_constraint}`; manual review required"
                 )
                 result["major_updates"].append(message)
-                result["notifications"].append(message)
+                add_grouped_notification(result, "major_version", message)
 
         if current_version == latest_tag:
             result["current"].append(
@@ -1148,6 +1192,7 @@ class UpdateReportGenerator:
             "current": [],
             "major_updates": [],
             "notifications": [],
+            "notification_groups": empty_notification_groups(),
             "warnings": [],
         }
         source_label = str(source.get("label") or "fallback source")
@@ -1178,7 +1223,7 @@ class UpdateReportGenerator:
                     f"(highest configured family: `{version_family_label(highest_configured)}`); "
                     f"manual review required{report_only_suffix}"
                 )
-                result["notifications"].append(message)
+                add_grouped_notification(result, "major_version", message)
             else:
                 result["current"].append(
                     f"{prefix}{source_label} latest version family from {source_name} is current "
@@ -1194,7 +1239,7 @@ class UpdateReportGenerator:
                 f"manual review required{report_only_suffix}"
             )
             result["major_updates"].append(message)
-            result["notifications"].append(message)
+            add_grouped_notification(result, "major_version", message)
         else:
             result["current"].append(
                 f"{prefix}{source_label} latest major version from {source_name} is current "
@@ -1421,6 +1466,7 @@ class UpdateReportGenerator:
             "current": [],
             "major_updates": [],
             "notifications": [],
+            "notification_groups": empty_notification_groups(),
             "warnings": [],
             "planned_changes": [],
         }
@@ -1455,34 +1501,45 @@ class UpdateReportGenerator:
             result["current"].extend(source_result["current"])
             result["major_updates"].extend(source_result["major_updates"])
             result["notifications"].extend(source_result["notifications"])
+            merge_notification_groups(result["notification_groups"], source_result.get("notification_groups"))
             result["warnings"].extend(source_result["warnings"])
             return True
 
-        def add_missing_eol_support_notification(message: str, *, fallback_checked: bool = False) -> None:
+        def add_missing_version_source_notification() -> None:
+            if not should_notify_missing_eol_support or fallback_source is not None:
+                return
+            versions = ", ".join(f"`{version}`" for version in configured_versions)
+            add_grouped_notification(
+                result,
+                "missing_version_source",
+                f"{prefix}no custom version-check source is configured for `{service_name}`; "
+                f"manually review new major versions for configured versions: {versions}",
+            )
+
+        def add_missing_eol_support_notification(message: str) -> None:
             if not should_notify_missing_eol_support:
                 return
             versions = ", ".join(f"`{version}`" for version in configured_versions)
-            review_target = "EOL dates" if fallback_checked else "EOL dates and new major versions"
-            result["notifications"].append(
-                f"{prefix}{message}; manually review {review_target} "
-                f"for configured versions: {versions}"
+            add_grouped_notification(
+                result,
+                "missing_eol",
+                f"{prefix}{message}; manually review EOL dates for configured versions: {versions}",
             )
 
         product_name = self.resolve_eol_product_name(repo, service_name)
         if product_name is None:
-            fallback_checked = add_fallback_source_result()
+            add_fallback_source_result()
+            add_missing_version_source_notification()
             add_missing_eol_support_notification(
-                f"no endoflife.date product support was found for `{service_name}`",
-                fallback_checked=fallback_checked,
+                f"no endoflife.date product support was found for `{service_name}`"
             )
             return result
 
         product_data = self.get_eol_product_data(product_name)
         if product_data is None:
-            fallback_checked = add_fallback_source_result()
+            add_fallback_source_result()
             add_missing_eol_support_notification(
-                f"endoflife.date product data could not be loaded for `{product_name}`",
-                fallback_checked=fallback_checked,
+                f"endoflife.date product data could not be loaded for `{product_name}`"
             )
             return result
 
@@ -1499,7 +1556,7 @@ class UpdateReportGenerator:
                     f"no endoflife.date release cycle was found for {product_label} version `{version}`"
                 )
                 if should_notify_missing_eol_support:
-                    result["notifications"].append(f"{prefix}{message}; manually review EOL status")
+                    add_grouped_notification(result, "missing_eol", f"{prefix}{message}; manually review EOL status")
                 else:
                     result["warnings"].append(f"{prefix}{message}")
                 continue
@@ -1541,7 +1598,7 @@ class UpdateReportGenerator:
                 f"(highest configured major: `{max(configured_majors)}`)"
             )
             result["major_updates"].append(message)
-            result["notifications"].append(message)
+            add_grouped_notification(result, "major_version", message)
 
         return result
 
@@ -1625,6 +1682,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         current: list[str] = []
         warnings: list[str] = []
         notifications: list[str] = []
+        notification_groups: dict[str, list[str]] = empty_notification_groups()
         eol_updates: list[str] = []
         major_updates: list[str] = []
         planned_changes: list[dict[str, Any]] = []
@@ -1699,6 +1757,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     current.extend(parent_result["current"])
                     warnings.extend(parent_result["warnings"])
                     notifications.extend(parent_result["notifications"])
+                    merge_notification_groups(notification_groups, parent_result.get("notification_groups"))
                     major_updates.extend(parent_result["major_updates"])
                     planned_changes.extend(parent_result["planned_changes"])
                     comparable = comparable or bool(parent_result["comparable"])
@@ -1714,6 +1773,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 eol_updates.extend(eol_result["updates"])
                 major_updates.extend(eol_result["major_updates"])
                 notifications.extend(eol_result["notifications"])
+                merge_notification_groups(notification_groups, eol_result.get("notification_groups"))
                 warnings.extend(eol_result["warnings"])
                 planned_changes.extend(eol_result["planned_changes"])
             except Exception as exc:
@@ -1815,7 +1875,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                             f"for `{helm_chart}` (current: `{helm_version}`); manual review required"
                         )
                         major_updates.append(message)
-                        notifications.append(message)
+                        add_repo_notification(notifications, notification_groups, "helm_major_version", message)
                     else:
                         message = (
                             f"{prefix}a new chart version is available `{latest_chart}` (current: `{helm_version}`)"
@@ -1898,6 +1958,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 current=current,
                 warnings=warnings,
                 notifications=notifications,
+                notification_groups=notification_groups,
                 eol_updates=eol_updates,
                 major_updates=major_updates,
                 planned_changes=planned_changes,
@@ -1919,6 +1980,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     ]
     comparable_no_updates = {result.repo for result in updates_section + no_changes_section}
     special_section = [result for result in results if result.repo not in comparable_no_updates]
+    notification_group_totals = {
+        group: sum(1 for result in results if result.notification_groups.get(group))
+        for group in NOTIFICATION_GROUP_ORDER
+    }
 
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     return {
@@ -1934,6 +1999,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             "no_changes": len(no_changes_section),
             "special": len(special_section) + len(missing_service_yml),
             "notifications": sum(1 for result in results if result.notifications),
+            "major_version_notifications": notification_group_totals["major_version"],
+            "helm_major_version_notifications": notification_group_totals["helm_major_version"],
+            "missing_version_source_notifications": notification_group_totals["missing_version_source"],
+            "missing_eol_notifications": notification_group_totals["missing_eol"],
             "eol_updates": sum(1 for result in results if result.eol_updates),
             "major_updates": sum(1 for result in results if result.major_updates),
             "planned_releases": sum(
@@ -1974,7 +2043,16 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Fully comparable repos with no changes: {report['totals']['no_changes']}")
     lines.append(f"- Special-case repos: {report['totals']['special']}")
     lines.append(f"- Repos with manual-review notifications: {report['totals']['notifications']}")
-    lines.append(f"- Repos with major-version notifications: {report['totals']['major_updates']}")
+    lines.append(f"- Repos with new major-version notifications: {report['totals'].get('major_version_notifications', 0)}")
+    lines.append(
+        f"- Repos with new Helm major-version notifications: "
+        f"{report['totals'].get('helm_major_version_notifications', 0)}"
+    )
+    lines.append(
+        f"- Repos without version-check sources: "
+        f"{report['totals'].get('missing_version_source_notifications', 0)}"
+    )
+    lines.append(f"- Repos without EOL data: {report['totals'].get('missing_eol_notifications', 0)}")
     lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
     lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
     if "applied_updates" in report["totals"]:
@@ -2064,15 +2142,38 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines.append(f"- {message}")
             lines.append("")
 
-    notification_items = [
-        item for item in sorted(report["per_repo"], key=lambda value: value["repo"]) if item.get("notifications")
-    ]
-    if notification_items:
-        lines.append("## Manual Review Notifications")
+    for group in NOTIFICATION_GROUP_ORDER:
+        grouped_items = [
+            (item, (item.get("notification_groups") or {}).get(group) or [])
+            for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+            if (item.get("notification_groups") or {}).get(group)
+        ]
+        if grouped_items:
+            lines.append(f"## {NOTIFICATION_GROUP_TITLES[group]}")
+            lines.append("")
+            for item, messages in grouped_items:
+                lines.append(f"### {item['repo']}")
+                for message in messages:
+                    lines.append(f"- {message}")
+                lines.append("")
+
+    other_notification_items = []
+    for item in sorted(report["per_repo"], key=lambda value: value["repo"]):
+        grouped_messages = {
+            message
+            for messages in (item.get("notification_groups") or {}).values()
+            for message in messages
+        }
+        other_messages = [message for message in item.get("notifications") or [] if message not in grouped_messages]
+        if other_messages:
+            other_notification_items.append((item, other_messages))
+
+    if other_notification_items:
+        lines.append("## Other Manual Review Notifications")
         lines.append("")
-        for item in notification_items:
+        for item, messages in other_notification_items:
             lines.append(f"### {item['repo']}")
-            for message in item["notifications"]:
+            for message in messages:
                 lines.append(f"- {message}")
             lines.append("")
 

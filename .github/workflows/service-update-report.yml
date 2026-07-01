@@ -341,11 +341,20 @@ jobs:
                   print(f"- {message}")
               print("")
 
-          if details and details.get("notifications"):
-              print("### Manual Review Notifications")
-              for message in details["notifications"]:
-                  print(f"- {message}")
-              print("")
+          if details:
+              group_titles = {
+                  "major_version": "New Major Version Detected",
+                  "helm_major_version": "New Helm Major Version Detected",
+                  "missing_version_source": "No Source for Version Checks Found",
+                  "missing_eol": "No EOL Could Be Found",
+              }
+              for group in ("major_version", "helm_major_version", "missing_version_source", "missing_eol"):
+                  messages = (details.get("notification_groups") or {}).get(group) or []
+                  if messages:
+                      print(f"### {group_titles[group]}")
+                      for message in messages:
+                          print(f"- {message}")
+                      print("")
 
           if repo in report["missing_service_yml"]:
               print("### Missing or Unreadable `service.yml`")
@@ -599,11 +608,20 @@ jobs:
                   print(f"- {message}")
               print("")
 
-          if details and details.get("notifications"):
-              print("### Manual Review Notifications")
-              for message in details["notifications"]:
-                  print(f"- {message}")
-              print("")
+          if details:
+              group_titles = {
+                  "major_version": "New Major Version Detected",
+                  "helm_major_version": "New Helm Major Version Detected",
+                  "missing_version_source": "No Source for Version Checks Found",
+                  "missing_eol": "No EOL Could Be Found",
+              }
+              for group in ("major_version", "helm_major_version", "missing_version_source", "missing_eol"):
+                  messages = (details.get("notification_groups") or {}).get(group) or []
+                  if messages:
+                      print(f"### {group_titles[group]}")
+                      for message in messages:
+                          print(f"- {message}")
+                      print("")
 
           if repo in report["missing_service_yml"]:
               print("### Missing or Unreadable `service.yml`")
