@@ -416,11 +416,25 @@ def make_planned_change(
     return change
 
 
+def duplicate_option_versions(options: list[Any]) -> set[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for option in options:
+        if not isinstance(option, dict) or option.get("version") is None:
+            continue
+        version = str(option["version"])
+        if version in seen:
+            duplicates.add(version)
+        seen.add(version)
+    return duplicates
+
+
 def raw_options_by_version(raw_options: list[Any]) -> dict[str, dict[str, Any]]:
+    duplicates = duplicate_option_versions(raw_options)
     return {
         str(option.get("version")): option
         for option in raw_options
-        if isinstance(option, dict) and option.get("version") is not None
+        if isinstance(option, dict) and option.get("version") is not None and str(option.get("version")) not in duplicates
     }
 
 
@@ -1848,6 +1862,13 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             image = images[0] if images else None
             options = service_data.get("options") or []
             raw_options = raw_service_data.get("options") or []
+            duplicate_versions = duplicate_option_versions(raw_options)
+            if duplicate_versions:
+                versions = ", ".join(f"`{version}`" for version in sorted(duplicate_versions))
+                warnings.append(
+                    f"{prefix}duplicate `options` version entries found for {versions}; "
+                    "automated updates for those versions are disabled"
+                )
             raw_option_index = raw_options_by_version(raw_options)
             helm = service_data.get("helm") or None
             raw_helm = raw_service_data.get("helm") or None

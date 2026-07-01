@@ -162,16 +162,23 @@ def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
         if not isinstance(options, list):
             raise RuntimeError(f"{path} cannot be updated because options is not a list")
         wanted_version = match.group("version")
-        for option in options:
-            if isinstance(option, dict) and normalize(option.get("version")) == wanted_version:
-                current = option.get(key)
-                if normalize(current) != expected_before:
-                    raise RuntimeError(
-                        f"{path} changed since report generation: expected {expected_before}, found {current}"
-                    )
-                option[key] = replacement_value(current, after)
-                return
-        raise RuntimeError(f"{path} cannot be updated because version {wanted_version} was not found")
+        matches = [
+            option
+            for option in options
+            if isinstance(option, dict) and normalize(option.get("version")) == wanted_version
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(f"{path} cannot be updated because version {wanted_version} appears more than once")
+        if not matches:
+            raise RuntimeError(f"{path} cannot be updated because version {wanted_version} was not found")
+        option = matches[0]
+        current = option.get(key)
+        if normalize(current) != expected_before:
+            raise RuntimeError(
+                f"{path} changed since report generation: expected {expected_before}, found {current}"
+            )
+        option[key] = replacement_value(current, after)
+        return
 
     raise RuntimeError(f"unsupported planned change path: {path}")
 
