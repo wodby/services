@@ -30,6 +30,7 @@ GITHUB_TAGS_URL = "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100
 WODBY_CHART_URL = "https://raw.githubusercontent.com/{owner}/charts/main/{chart}/Chart.yaml"
 ENDOFLIFE_PRODUCTS_URL = "https://endoflife.date/api/v1/products"
 ENDOFLIFE_PRODUCT_URL = "https://endoflife.date/api/v1/products/{product}/"
+TAILSCALE_STABLE_URL = "https://pkgs.tailscale.com/stable/"
 
 EOL_PRODUCT_ALIASES = {
     "cloud-mariadb": "mariadb",
@@ -46,6 +47,86 @@ EOL_PRODUCT_ALIASES = {
     "vinyl": "vinyl-cache",
 }
 
+FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
+    "3xui": {
+        "label": "3X UI",
+        "source_label": "MHSanaei/3x-ui GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "MHSanaei",
+        "repo": "3x-ui",
+        "current_field": "tag",
+        "comparison": "major",
+    },
+    "dagster": {
+        "label": "Dagster",
+        "source_label": "dagster/dagster-celery-k8s image tags",
+        "report_only": True,
+        "kind": "image_tags",
+        "image": "dagster/dagster-celery-k8s",
+        "current_field": "tag",
+        "comparison": "major",
+    },
+    "gotenberg": {
+        "label": "Gotenberg",
+        "source_label": "gotenberg/gotenberg GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "gotenberg",
+        "repo": "gotenberg",
+        "current_field": "tag",
+        "comparison": "major",
+    },
+    "mailpit": {
+        "label": "Mailpit",
+        "source_label": "axllent/mailpit GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "axllent",
+        "repo": "mailpit",
+        "current_field": "tag",
+        "comparison": "major",
+    },
+    "nfs-provisioner": {
+        "label": "NFS-Ganesha",
+        "source_label": "nfs-ganesha/nfs-ganesha GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "nfs-ganesha",
+        "repo": "nfs-ganesha",
+        "current_field": "tag",
+        "comparison": "major",
+    },
+    "openclaw": {
+        "label": "OpenClaw",
+        "source_label": "openclaw/openclaw GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "openclaw",
+        "repo": "openclaw",
+        "current_field": "version",
+        "comparison": "major",
+    },
+    "opensmtpd": {
+        "label": "OpenSMTPD Portable",
+        "source_label": "OpenSMTPD/OpenSMTPD GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "OpenSMTPD",
+        "repo": "OpenSMTPD",
+        "current_field": "version",
+        "comparison": "major",
+    },
+    "tailscale": {
+        "label": "Tailscale stable",
+        "source_label": "Tailscale stable package index",
+        "report_only": True,
+        "kind": "tailscale_stable",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+}
+
 WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d+)*))?$")
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -54,6 +135,8 @@ CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+\.\d+)$")
 BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image stability tag updated to (?P<tag>\S+)", re.IGNORECASE)
 FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):", re.MULTILINE)
 README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
+SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+){0,2})(?:p(?P<portable>\d+))?$")
+TAILSCALE_STABLE_OPTION_RE = re.compile(r'<option value="(?P<version>\d+\.\d+\.\d+)"')
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +164,67 @@ def parse_version(value: str | None) -> Version | None:
         return Version(text)
     except InvalidVersion:
         return None
+
+
+def parse_source_version(value: Any) -> Version | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("alpha", "beta", "dev", "rc", "snapshot")):
+        return None
+
+    match = SOURCE_VERSION_TAG_RE.match(text)
+    if not match:
+        return None
+
+    version = match.group("version")
+    portable = match.group("portable")
+    if portable is not None:
+        version = f"{version}.post{portable}"
+
+    parsed = parse_version(version)
+    if parsed is None or parsed.is_prerelease:
+        return None
+    return parsed
+
+
+def latest_source_version(values: list[str] | set[str]) -> tuple[Version, str] | None:
+    candidates: list[tuple[Version, str]] = []
+    for value in values:
+        parsed = parse_source_version(value)
+        if parsed is not None:
+            candidates.append((parsed, str(value)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0]
+
+
+def configured_source_versions(options: list[Any], current_field: str) -> list[tuple[Version, str]]:
+    candidates: list[tuple[Version, str]] = []
+    fallback_fields = ["tag", "version"] if current_field != "tag" else ["version"]
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        value = option.get(current_field)
+        if value is None:
+            for field in fallback_fields:
+                value = option.get(field)
+                if value is not None:
+                    break
+        parsed = parse_source_version(value)
+        if parsed is not None:
+            candidates.append((parsed, str(value)))
+    return candidates
+
+
+def version_family_label(version: Version, depth: int = 2) -> str:
+    release = version.release
+    if len(release) < depth:
+        release = release + (0,) * (depth - len(release))
+    return ".".join(str(part) for part in release[:depth])
 
 
 def exact_match(base: str, wanted: str) -> bool:
@@ -974,6 +1118,91 @@ class UpdateReportGenerator:
             return self.get_dockerhub_tags(image)
         raise RuntimeError(f"unsupported image registry for {image}")
 
+    def get_tailscale_stable_versions(self) -> list[str]:
+        cache_key = ("tailscale-stable", "versions")
+        if cache_key in self._registry_tags_cache:
+            return self._registry_tags_cache[cache_key]
+
+        text = self.fetch(TAILSCALE_STABLE_URL).text
+        versions = sorted({match.group("version") for match in TAILSCALE_STABLE_OPTION_RE.finditer(text)})
+        self._registry_tags_cache[cache_key] = versions
+        return versions
+
+    def get_fallback_version_source_values(self, source: dict[str, Any]) -> list[str] | set[str]:
+        kind = str(source.get("kind") or "")
+        if kind == "github_tags":
+            return self.get_github_tags(str(source["owner"]), str(source["repo"]))
+        if kind == "image_tags":
+            return self.get_image_tags(str(source["image"]))
+        if kind == "tailscale_stable":
+            return self.get_tailscale_stable_versions()
+        raise RuntimeError(f"unsupported fallback version source kind {kind!r}")
+
+    def check_fallback_version_source(
+        self,
+        source: dict[str, Any],
+        options: list[Any],
+        prefix: str,
+    ) -> dict[str, list[str]]:
+        result = {
+            "current": [],
+            "major_updates": [],
+            "notifications": [],
+            "warnings": [],
+        }
+        source_label = str(source.get("label") or "fallback source")
+        source_name = str(source.get("source_label") or source_label)
+        report_only_suffix = "; report only, no manifest update will be planned" if source.get("report_only") else ""
+        latest = latest_source_version(self.get_fallback_version_source_values(source))
+        if latest is None:
+            result["warnings"].append(f"{prefix}no stable {source_label} versions were found in the fallback source")
+            return result
+
+        configured = configured_source_versions(options, str(source.get("current_field") or "tag"))
+        if not configured:
+            result["warnings"].append(f"{prefix}no configured versions could be parsed for {source_label}")
+            return result
+
+        latest_version, latest_raw = latest
+        configured.sort(key=lambda item: item[0], reverse=True)
+        highest_configured, highest_configured_raw = configured[0]
+        comparison = str(source.get("comparison") or "major")
+
+        if comparison == "minor_family":
+            latest_family = latest_version.release[:2]
+            configured_family = highest_configured.release[:2]
+            if latest_family > configured_family:
+                message = (
+                    f"{prefix}new {source_label} version family `{latest_raw}` is available "
+                    f"from {source_name} "
+                    f"(highest configured family: `{version_family_label(highest_configured)}`); "
+                    f"manual review required{report_only_suffix}"
+                )
+                result["notifications"].append(message)
+            else:
+                result["current"].append(
+                    f"{prefix}{source_label} latest version family from {source_name} is current "
+                    f"(`{latest_raw}`, configured: `{highest_configured_raw}`)"
+                )
+            return result
+
+        if latest_version.major > highest_configured.major:
+            message = (
+                f"{prefix}new {source_label} major version `{latest_raw}` is available "
+                f"from {source_name} "
+                f"(highest configured major: `{highest_configured.major}`); "
+                f"manual review required{report_only_suffix}"
+            )
+            result["major_updates"].append(message)
+            result["notifications"].append(message)
+        else:
+            result["current"].append(
+                f"{prefix}{source_label} latest major version from {source_name} is current "
+                f"(`{latest_raw}`, configured: `{highest_configured_raw}`)"
+            )
+
+        return result
+
     def get_oci_tags(self, reference: str) -> list[str]:
         parsed = urlparse(reference)
         if parsed.scheme != "oci":
@@ -1181,6 +1410,7 @@ class UpdateReportGenerator:
         self,
         repo: str,
         service_name: str,
+        service_type: str,
         options: list[Any],
         raw_options: list[Any],
         prefix: str,
@@ -1188,6 +1418,7 @@ class UpdateReportGenerator:
     ) -> dict[str, list[Any]]:
         result = {
             "updates": [],
+            "current": [],
             "major_updates": [],
             "notifications": [],
             "warnings": [],
@@ -1196,21 +1427,67 @@ class UpdateReportGenerator:
         if not options:
             return result
 
-        product_name = self.resolve_eol_product_name(repo, service_name)
-        if product_name is None:
-            return result
-
-        product_data = self.get_eol_product_data(product_name)
-        if product_data is None:
-            return result
-
-        product_label = str(product_data.get("label") or product_name)
-        updateable_options = raw_options_by_version(raw_options)
         configured_versions = [
             str(option.get("version"))
             for option in options
             if isinstance(option, dict) and option.get("version") is not None
         ]
+        if not configured_versions:
+            return result
+
+        should_notify_missing_eol_support = service_type != "infrastructure"
+        fallback_source = (
+            FALLBACK_VERSION_SOURCES.get(normalize_service_key(service_name))
+            or FALLBACK_VERSION_SOURCES.get(normalize_service_key(repo))
+        )
+
+        def add_fallback_source_result() -> bool:
+            if not should_notify_missing_eol_support or fallback_source is None:
+                return False
+            try:
+                source_result = self.check_fallback_version_source(fallback_source, options, prefix)
+            except Exception as exc:
+                result["warnings"].append(
+                    f"{prefix}{fallback_source.get('label', 'fallback source')} version source lookup failed: {exc}"
+                )
+                return False
+
+            result["current"].extend(source_result["current"])
+            result["major_updates"].extend(source_result["major_updates"])
+            result["notifications"].extend(source_result["notifications"])
+            result["warnings"].extend(source_result["warnings"])
+            return True
+
+        def add_missing_eol_support_notification(message: str, *, fallback_checked: bool = False) -> None:
+            if not should_notify_missing_eol_support:
+                return
+            versions = ", ".join(f"`{version}`" for version in configured_versions)
+            review_target = "EOL dates" if fallback_checked else "EOL dates and new major versions"
+            result["notifications"].append(
+                f"{prefix}{message}; manually review {review_target} "
+                f"for configured versions: {versions}"
+            )
+
+        product_name = self.resolve_eol_product_name(repo, service_name)
+        if product_name is None:
+            fallback_checked = add_fallback_source_result()
+            add_missing_eol_support_notification(
+                f"no endoflife.date product support was found for `{service_name}`",
+                fallback_checked=fallback_checked,
+            )
+            return result
+
+        product_data = self.get_eol_product_data(product_name)
+        if product_data is None:
+            fallback_checked = add_fallback_source_result()
+            add_missing_eol_support_notification(
+                f"endoflife.date product data could not be loaded for `{product_name}`",
+                fallback_checked=fallback_checked,
+            )
+            return result
+
+        product_label = str(product_data.get("label") or product_name)
+        updateable_options = raw_options_by_version(raw_options)
 
         for option in options:
             if not isinstance(option, dict) or option.get("version") is None:
@@ -1218,9 +1495,13 @@ class UpdateReportGenerator:
             version = str(option.get("version"))
             release = self.best_eol_release(product_data, version)
             if release is None:
-                result["warnings"].append(
-                    f"{prefix}no endoflife.date release cycle was found for {product_label} version `{version}`"
+                message = (
+                    f"no endoflife.date release cycle was found for {product_label} version `{version}`"
                 )
+                if should_notify_missing_eol_support:
+                    result["notifications"].append(f"{prefix}{message}; manually review EOL status")
+                else:
+                    result["warnings"].append(f"{prefix}{message}")
                 continue
 
             eol_from = release.get("eolFrom")
@@ -1425,8 +1706,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     warnings.append(f"{prefix}parent service version lookup failed for `{parent_name}`: {exc}")
 
             try:
-                eol_result = generator.check_eol_options(repo, label, options, raw_options, prefix, manifest_path)
+                eol_result = generator.check_eol_options(
+                    repo, label, service_type, options, raw_options, prefix, manifest_path
+                )
                 updates.extend(eol_result["updates"])
+                current.extend(eol_result["current"])
                 eol_updates.extend(eol_result["updates"])
                 major_updates.extend(eol_result["major_updates"])
                 notifications.extend(eol_result["notifications"])
