@@ -125,6 +125,76 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
         "current_field": "version",
         "comparison": "minor_family",
     },
+    "aws-lb-controller": {
+        "label": "AWS Load Balancer Controller",
+        "source_label": "kubernetes-sigs/aws-load-balancer-controller GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "kubernetes-sigs",
+        "repo": "aws-load-balancer-controller",
+        "current_field": "helm_app_version",
+        "comparison": "major",
+    },
+    "envoy-gateway": {
+        "label": "Envoy Gateway",
+        "source_label": "envoyproxy/gateway GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "envoyproxy",
+        "repo": "gateway",
+        "current_field": "helm_version",
+        "comparison": "major",
+    },
+    "frpc": {
+        "label": "FRP",
+        "source_label": "fatedier/frp GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "fatedier",
+        "repo": "frp",
+        "current_field": "wodby_chart_image_tag",
+        "comparison": "minor_family",
+    },
+    "kube-state-metrics": {
+        "label": "Kube State Metrics",
+        "source_label": "kubernetes/kube-state-metrics GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "kubernetes",
+        "repo": "kube-state-metrics",
+        "current_field": "helm_app_version",
+        "comparison": "major",
+    },
+    "metrics-server": {
+        "label": "Metrics Server",
+        "source_label": "kubernetes-sigs/metrics-server GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "kubernetes-sigs",
+        "repo": "metrics-server",
+        "current_field": "helm_app_version",
+        "comparison": "minor_family",
+    },
+    "monitoring": {
+        "label": "Grafana Alloy",
+        "source_label": "grafana/alloy GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "grafana",
+        "repo": "alloy",
+        "current_field": "helm_app_version",
+        "comparison": "major",
+    },
+    "node-exporter": {
+        "label": "Node Exporter",
+        "source_label": "prometheus/node_exporter GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "prometheus",
+        "repo": "node_exporter",
+        "current_field": "helm_app_version",
+        "comparison": "major",
+    },
 }
 
 WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d+)*))?$")
@@ -703,6 +773,7 @@ class UpdateReportGenerator:
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
         self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._wodby_chart_cache: dict[str, str] = {}
+        self._wodby_chart_values_cache: dict[str, dict[str, Any]] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
         self._eol_product_cache: dict[str, dict[str, Any] | None] = {}
 
@@ -1172,6 +1243,13 @@ class UpdateReportGenerator:
         self._registry_tags_cache[cache_key] = versions
         return versions
 
+    @staticmethod
+    def resolve_fallback_version_source(repo: str, service_name: str) -> dict[str, Any] | None:
+        return (
+            FALLBACK_VERSION_SOURCES.get(normalize_service_key(service_name))
+            or FALLBACK_VERSION_SOURCES.get(normalize_service_key(repo))
+        )
+
     def get_fallback_version_source_values(self, source: dict[str, Any]) -> list[str] | set[str]:
         kind = str(source.get("kind") or "")
         if kind == "github_tags":
@@ -1182,11 +1260,74 @@ class UpdateReportGenerator:
             return self.get_tailscale_stable_versions()
         raise RuntimeError(f"unsupported fallback version source kind {kind!r}")
 
+    def get_helm_app_version(self, source: str | None, chart: str | None, version: str | None) -> str | None:
+        if not source or not chart or not version or source.startswith("oci://"):
+            return None
+
+        if source not in self._helm_index_cache:
+            index_url = f"{source.rstrip('/')}/index.yaml"
+            payload = yaml.safe_load(self.fetch(index_url).content.decode("utf-8", "ignore"))
+            self._helm_index_cache[source] = payload
+
+        chart_name = chart.split("/", 1)[1] if "/" in chart else chart
+        entries = self._helm_index_cache[source].get("entries", {}).get(chart_name, [])
+        for entry in entries:
+            if str(entry.get("version")) == version and entry.get("appVersion") is not None:
+                return str(entry["appVersion"])
+        return None
+
+    def get_wodby_chart_values(self, chart_name: str) -> dict[str, Any]:
+        if chart_name not in self._wodby_chart_values_cache:
+            url = f"https://raw.githubusercontent.com/{self.owner}/charts/main/{chart_name}/values.yaml"
+            payload = yaml.safe_load(self.fetch(url).text) or {}
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{chart_name} values.yaml did not decode to a mapping")
+            self._wodby_chart_values_cache[chart_name] = payload
+        return self._wodby_chart_values_cache[chart_name]
+
+    def get_wodby_chart_image_tag(self, chart: str | None) -> str | None:
+        if not chart:
+            return None
+        chart_name = chart.rsplit("/", 1)[-1]
+        values = self.get_wodby_chart_values(chart_name)
+        image = values.get("image") if isinstance(values, dict) else None
+        if isinstance(image, dict) and image.get("tag") is not None:
+            return str(image["tag"])
+        return None
+
+    def configured_fallback_source_versions(
+        self,
+        source: dict[str, Any],
+        options: list[Any],
+        helm_source: str | None,
+        helm_chart: str | None,
+        helm_version: str | None,
+    ) -> list[tuple[Version, str]]:
+        current_field = str(source.get("current_field") or "tag")
+        if current_field in ("tag", "version") and options:
+            return configured_source_versions(options, current_field)
+
+        current_value = None
+        if current_field == "helm_version":
+            current_value = helm_version
+        elif current_field == "helm_app_version":
+            current_value = self.get_helm_app_version(helm_source, helm_chart, helm_version)
+        elif current_field == "wodby_chart_image_tag":
+            current_value = self.get_wodby_chart_image_tag(helm_chart)
+
+        parsed = parse_source_version(current_value)
+        if parsed is None:
+            return []
+        return [(parsed, str(current_value))]
+
     def check_fallback_version_source(
         self,
         source: dict[str, Any],
         options: list[Any],
         prefix: str,
+        helm_source: str | None = None,
+        helm_chart: str | None = None,
+        helm_version: str | None = None,
     ) -> dict[str, list[str]]:
         result = {
             "current": [],
@@ -1203,7 +1344,9 @@ class UpdateReportGenerator:
             result["warnings"].append(f"{prefix}no stable {source_label} versions were found in the fallback source")
             return result
 
-        configured = configured_source_versions(options, str(source.get("current_field") or "tag"))
+        configured = self.configured_fallback_source_versions(
+            source, options, helm_source, helm_chart, helm_version
+        )
         if not configured:
             result["warnings"].append(f"{prefix}no configured versions could be parsed for {source_label}")
             return result
@@ -1482,28 +1625,7 @@ class UpdateReportGenerator:
             return result
 
         should_notify_missing_eol_support = service_type != "infrastructure"
-        fallback_source = (
-            FALLBACK_VERSION_SOURCES.get(normalize_service_key(service_name))
-            or FALLBACK_VERSION_SOURCES.get(normalize_service_key(repo))
-        )
-
-        def add_fallback_source_result() -> bool:
-            if not should_notify_missing_eol_support or fallback_source is None:
-                return False
-            try:
-                source_result = self.check_fallback_version_source(fallback_source, options, prefix)
-            except Exception as exc:
-                result["warnings"].append(
-                    f"{prefix}{fallback_source.get('label', 'fallback source')} version source lookup failed: {exc}"
-                )
-                return False
-
-            result["current"].extend(source_result["current"])
-            result["major_updates"].extend(source_result["major_updates"])
-            result["notifications"].extend(source_result["notifications"])
-            merge_notification_groups(result["notification_groups"], source_result.get("notification_groups"))
-            result["warnings"].extend(source_result["warnings"])
-            return True
+        fallback_source = self.resolve_fallback_version_source(repo, service_name)
 
         def add_missing_version_source_notification() -> None:
             if not should_notify_missing_eol_support or fallback_source is not None:
@@ -1528,7 +1650,6 @@ class UpdateReportGenerator:
 
         product_name = self.resolve_eol_product_name(repo, service_name)
         if product_name is None:
-            add_fallback_source_result()
             add_missing_version_source_notification()
             add_missing_eol_support_notification(
                 f"no endoflife.date product support was found for `{service_name}`"
@@ -1537,7 +1658,6 @@ class UpdateReportGenerator:
 
         product_data = self.get_eol_product_data(product_name)
         if product_data is None:
-            add_fallback_source_result()
             add_missing_eol_support_notification(
                 f"endoflife.date product data could not be loaded for `{product_name}`"
             )
@@ -1778,6 +1898,32 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 planned_changes.extend(eol_result["planned_changes"])
             except Exception as exc:
                 warnings.append(f"{prefix}endoflife.date lookup failed: {exc}")
+
+            fallback_source = generator.resolve_fallback_version_source(repo, label)
+            if fallback_source is not None:
+                try:
+                    source_result = generator.check_fallback_version_source(
+                        fallback_source,
+                        options,
+                        prefix,
+                        helm_source,
+                        helm_chart,
+                        helm_version,
+                    )
+                    current.extend(source_result["current"])
+                    major_updates.extend(source_result["major_updates"])
+                    notifications.extend(source_result["notifications"])
+                    merge_notification_groups(notification_groups, source_result.get("notification_groups"))
+                    warnings.extend(source_result["warnings"])
+                    comparable = comparable or bool(
+                        source_result["current"]
+                        or source_result["major_updates"]
+                        or source_result["notifications"]
+                    )
+                except Exception as exc:
+                    warnings.append(
+                        f"{prefix}{fallback_source.get('label', 'fallback source')} version source lookup failed: {exc}"
+                    )
 
             if len(images) > 1:
                 warnings.append(
