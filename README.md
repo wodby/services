@@ -69,8 +69,11 @@ Before publishing a service for others to use, review:
 | Varnish | [wodby/service-varnish](https://github.com/wodby/service-varnish) |
 | Varnish for Drupal | [wodby/service-drupal-varnish](https://github.com/wodby/service-drupal-varnish) |
 | Varnish for WordPress | [wodby/service-wordpress-varnish](https://github.com/wodby/service-wordpress-varnish) |
-| Envoy Gateway | [wodby/service-envoy-gateway](https://github.com/wodby/service-envoy-gateway) |
-| FRPC | [wodby/service-frpc](https://github.com/wodby/service-frpc) |
+
+### Networking
+
+| Service | Repository |
+| --- | --- |
 | Tailscale | [wodby/service-tailscale](https://github.com/wodby/service-tailscale) |
 | 3X UI | [wodby/service-3xui](https://github.com/wodby/service-3xui) |
 
@@ -88,9 +91,14 @@ Before publishing a service for others to use, review:
 | Redis | [wodby/service-redis](https://github.com/wodby/service-redis) |
 | Solr | [wodby/service-solr](https://github.com/wodby/service-solr) |
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
+| Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
+
+### Mail
+
+| Service | Repository |
+| --- | --- |
 | Mailpit | [wodby/service-mailpit](https://github.com/wodby/service-mailpit) |
 | OpenSMTPD | [wodby/service-opensmtpd](https://github.com/wodby/service-opensmtpd) |
-| Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
 
 ### Kubernetes and platform
 
@@ -101,5 +109,17 @@ Before publishing a service for others to use, review:
 | Node Exporter | [wodby/service-node-exporter](https://github.com/wodby/service-node-exporter) |
 | Kube State Metrics | [wodby/service-kube-state-metrics](https://github.com/wodby/service-kube-state-metrics) |
 | AWS LB Controller | [wodby/service-aws-lb-controller](https://github.com/wodby/service-aws-lb-controller) |
+| Envoy Gateway | [wodby/service-envoy-gateway](https://github.com/wodby/service-envoy-gateway) |
+| FRPC | [wodby/service-frpc](https://github.com/wodby/service-frpc) |
+
+### Storage
+
+| Service | Repository |
+| --- | --- |
 | NFS Provisioner | [wodby/service-nfs-provisioner](https://github.com/wodby/service-nfs-provisioner) |
+
+### AI
+
+| Service | Repository |
+| --- | --- |
 | OpenClaw | [wodby/service-openclaw](https://github.com/wodby/service-openclaw) |
