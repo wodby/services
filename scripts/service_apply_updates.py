@@ -84,24 +84,52 @@ def repo_item(report: dict[str, Any], repo: str) -> dict[str, Any]:
     raise RuntimeError(f"report does not contain per_repo details for {repo}")
 
 
-def ensure_branch(repo_dir: Path) -> str:
-    branch = run_git(repo_dir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    if branch != "HEAD":
-        return branch
+def fetch_origin(repo_dir: Path) -> None:
+    run_git(repo_dir, "fetch", "origin", "--prune", "--tags")
 
+
+def ensure_clean_worktree(repo_dir: Path) -> None:
+    status = run_git(repo_dir, "status", "--porcelain").stdout.strip()
+    if status:
+        raise RuntimeError("checked-out service repo has uncommitted changes; refusing to apply updates")
+
+
+def default_branch(repo_dir: Path) -> str:
     remote_head_process = run_git(repo_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
     remote_head = remote_head_process.stdout.strip()
     if remote_head.startswith("origin/"):
-        branch = remote_head.split("/", 1)[1]
-    else:
-        branch = ""
-        for candidate in ("master", "main"):
-            if run_git(repo_dir, "rev-parse", "--verify", f"refs/remotes/origin/{candidate}", check=False).returncode == 0:
-                branch = candidate
-                break
-        if not branch:
-            raise RuntimeError("unable to determine default branch from origin/HEAD, origin/master, or origin/main")
-    run_git(repo_dir, "checkout", "-B", branch, f"origin/{branch}")
+        return remote_head.split("/", 1)[1]
+
+    for candidate in ("master", "main"):
+        if run_git(repo_dir, "rev-parse", "--verify", f"refs/remotes/origin/{candidate}", check=False).returncode == 0:
+            return candidate
+    raise RuntimeError("unable to determine default branch from origin/HEAD, origin/master, or origin/main")
+
+
+def ensure_branch(repo_dir: Path) -> str:
+    branch = default_branch(repo_dir)
+    origin_ref = f"origin/{branch}"
+    current_branch = run_git(repo_dir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+    if current_branch == "HEAD":
+        run_git(repo_dir, "checkout", "-B", branch, origin_ref)
+        return branch
+
+    if current_branch != branch:
+        raise RuntimeError(f"checked-out branch {current_branch} is not the default branch {branch}")
+
+    current_sha = run_git(repo_dir, "rev-parse", "HEAD").stdout.strip()
+    origin_sha = run_git(repo_dir, "rev-parse", origin_ref).stdout.strip()
+    if current_sha != origin_sha:
+        raise RuntimeError(f"checked-out branch {branch} is not at {origin_ref}; refusing to apply stale updates")
+    return branch
+
+
+def prepare_repo_for_apply(repo_dir: Path) -> str:
+    ensure_clean_worktree(repo_dir)
+    fetch_origin(repo_dir)
+    branch = ensure_branch(repo_dir)
+    ensure_clean_worktree(repo_dir)
     return branch
 
 
@@ -246,10 +274,10 @@ def configure_git_identity(repo_dir: Path) -> None:
 def commit_push_and_tag(
     repo_dir: Path,
     repo: str,
+    branch: str,
     release: dict[str, Any],
     changed_files: list[str],
 ) -> dict[str, Any]:
-    branch = ensure_branch(repo_dir)
     configure_git_identity(repo_dir)
 
     run_git(repo_dir, "add", *changed_files)
@@ -345,9 +373,10 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
         item["apply_result"] = result
         return report, result
 
+    branch = prepare_repo_for_apply(repo_dir)
     validate_planned_release(repo_dir, release)
     changed_files = apply_manifest_changes(repo_dir, planned_changes)
-    result = commit_push_and_tag(repo_dir, args.repo, release, changed_files)
+    result = commit_push_and_tag(repo_dir, args.repo, branch, release, changed_files)
     item["apply_result"] = result
     return report, result
 
