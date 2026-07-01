@@ -94,6 +94,7 @@ def event_counts(
         "planned_releases": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "planned"
         ),
+        "dry_run_updates": sum(1 for item in items if item.get("dry_run_diffs")),
         "release_blockers": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "blocked"
         ),
@@ -192,6 +193,22 @@ def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -
         lines.append("")
 
 
+def append_repo_dry_run_changes(lines: list[str], items: list[dict[str, Any]]) -> None:
+    selected = [(item, item.get("dry_run_diffs") or []) for item in items if item.get("dry_run_diffs")]
+    if not selected:
+        return
+
+    lines.append("Manual Review Dry Run Diffs")
+    lines.append("")
+    lines.append("These diffs are generated for manual review only. The workflow does not apply them.")
+    lines.append("")
+    for item, dry_run_diffs in selected:
+        lines.append(f"{item['repo']}:")
+        for dry_run_diff in dry_run_diffs:
+            lines.extend(str(dry_run_diff).rstrip().splitlines())
+        lines.append("")
+
+
 def append_repo_apply_results(lines: list[str], items: list[dict[str, Any]]) -> None:
     selected = [(item, item.get("apply_result") or {}) for item in items if item.get("apply_result")]
     if not selected:
@@ -256,6 +273,7 @@ def build_body(
         lines.append("")
 
     append_repo_planned_changes(lines, items)
+    append_repo_dry_run_changes(lines, items)
     append_repo_apply_results(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
     append_grouped_notifications(lines, items)
@@ -463,6 +481,28 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
+def html_dry_run_changes(items: list[dict[str, Any]]) -> str:
+    selected = [(item, item.get("dry_run_diffs") or []) for item in items if item.get("dry_run_diffs")]
+    if not selected:
+        return ""
+
+    blocks = [
+        "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
+        "Manual Review Dry Run Diffs</h2>",
+        "<p style=\"margin:0 0 12px 0;color:#4b5563;\">"
+        "These diffs are generated for manual review only. The workflow does not apply them.</p>",
+    ]
+    for item, dry_run_diffs in selected:
+        blocks.append(
+            "<div style=\"margin:0 0 18px 0;padding:14px;border:1px solid #d1d5db;border-radius:6px;\">"
+            f"<h3 style=\"margin:0 0 8px 0;font-size:17px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
+        )
+        for dry_run_diff in dry_run_diffs:
+            blocks.append(html_diff(str(dry_run_diff)))
+        blocks.append("</div>")
+    return "".join(blocks)
+
+
 def html_apply_results(items: list[dict[str, Any]]) -> str:
     selected = [(item, item.get("apply_result") or {}) for item in items if item.get("apply_result")]
     if not selected:
@@ -559,6 +599,7 @@ def build_html_body(
             "</div>"
         )
     body.append(html_planned_changes(items))
+    body.append(html_dry_run_changes(items))
     body.append(html_apply_results(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
     body.append(html_grouped_notifications(items))
@@ -573,6 +614,7 @@ def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str
     return (
         f"[services] report {status}: "
         f"{counts['updates']} update repos, "
+        f"{counts['dry_run_updates']} dry-run repos, "
         f"{counts['major_version_notifications']} major-version repos, "
         f"{counts['helm_major_version_notifications']} Helm-major repos ({short_sha})"
     )

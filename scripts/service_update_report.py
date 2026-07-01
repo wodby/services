@@ -415,6 +415,32 @@ def make_planned_change(
     return change
 
 
+def make_dry_run_option_add(
+    manifest_path: str,
+    version: str,
+    tag: str,
+    description: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    option = {"version": version, "tag": tag}
+    change = make_planned_change(
+        manifest_path,
+        f"options[version={version}]",
+        "option",
+        None,
+        option,
+        description,
+        {
+            "change_type": "option_add",
+            "dry_run": True,
+            "diff_after_lines": yaml.safe_dump([option], sort_keys=False).rstrip().splitlines(),
+        },
+    )
+    if extra:
+        change.update(extra)
+    return change
+
+
 def duplicate_option_versions(options: list[Any]) -> set[str]:
     seen: set[str] = set()
     duplicates: set[str] = set()
@@ -454,8 +480,16 @@ def render_planned_diffs(planned_changes: list[dict[str, Any]]) -> list[str]:
             key = str(change.get("key") or "value")
             path = str(change.get("path") or key)
             lines.append(f"@@ {path} @@")
-            lines.append(f"-{key}: {format_diff_value(change.get('before'))}")
-            lines.append(f"+{key}: {format_diff_value(change.get('after'))}")
+            diff_before_lines = change.get("diff_before_lines")
+            diff_after_lines = change.get("diff_after_lines")
+            if isinstance(diff_before_lines, list) or isinstance(diff_after_lines, list):
+                for line in diff_before_lines or []:
+                    lines.append(f"-{line}")
+                for line in diff_after_lines or []:
+                    lines.append(f"+{line}")
+            else:
+                lines.append(f"-{key}: {format_diff_value(change.get('before'))}")
+                lines.append(f"+{key}: {format_diff_value(change.get('after'))}")
         diffs.append("\n".join(lines))
     return diffs
 
@@ -732,6 +766,8 @@ class RepoResult:
     major_updates: list[str]
     planned_changes: list[dict[str, Any]]
     planned_diffs: list[str]
+    dry_run_changes: list[dict[str, Any]]
+    dry_run_diffs: list[str]
     updates_without_local_diff: list[str]
     planned_release: dict[str, Any] | None
 
@@ -756,6 +792,8 @@ class RepoResult:
             "major_updates": self.major_updates,
             "planned_changes": self.planned_changes,
             "planned_diffs": self.planned_diffs,
+            "dry_run_changes": self.dry_run_changes,
+            "dry_run_diffs": self.dry_run_diffs,
             "updates_without_local_diff": self.updates_without_local_diff,
             "planned_release": self.planned_release,
         }
@@ -926,6 +964,7 @@ class UpdateReportGenerator:
             "notification_groups": empty_notification_groups(),
             "major_updates": [],
             "planned_changes": [],
+            "dry_run_changes": [],
             "comparable": False,
         }
         parent_repo = self.service_name_to_repo(str(parent_name))
@@ -975,12 +1014,49 @@ class UpdateReportGenerator:
         if overall_latest:
             overall_version, overall_tag, _overall_prefix = overall_latest[0]
             if overall_version >= caret_upper_bound(base_version):
+                target_constraint = f"^{overall_tag if current_constraint.lstrip('^').startswith('v') else overall_version}"
                 message = (
                     f"{prefix}new major parent service `{parent_repo}` tag `{overall_tag}` is available "
                     f"outside `fromVersionConstraint` `{current_constraint}`; manual review required"
                 )
                 result["major_updates"].append(message)
                 add_grouped_notification(result, "major_version", message)
+                result["dry_run_changes"].extend(
+                    [
+                        make_planned_change(
+                            manifest_path,
+                            "fromVersionConstraint",
+                            "fromVersionConstraint",
+                            current_constraint,
+                            target_constraint,
+                            message,
+                            {
+                                "change_type": "parent_service_version",
+                                "dry_run": True,
+                                "parent_repo": parent_repo,
+                                "parent_tag": overall_tag,
+                                "from_version_constraint": target_constraint,
+                                "service_label": prefix.strip("[] ") if prefix else "",
+                            },
+                        ),
+                        make_planned_change(
+                            manifest_path,
+                            "fromVersion",
+                            "fromVersion",
+                            current_version,
+                            overall_tag,
+                            message,
+                            {
+                                "change_type": "parent_service_version",
+                                "dry_run": True,
+                                "parent_repo": parent_repo,
+                                "parent_tag": overall_tag,
+                                "from_version_constraint": target_constraint,
+                                "service_label": prefix.strip("[] ") if prefix else "",
+                            },
+                        ),
+                    ]
+                )
 
         if current_version == latest_tag:
             result["current"].append(
@@ -1420,16 +1496,19 @@ class UpdateReportGenerator:
         helm_source: str | None = None,
         helm_chart: str | None = None,
         helm_version: str | None = None,
-    ) -> dict[str, list[str]]:
+    ) -> dict[str, Any]:
         result = {
             "current": [],
             "major_updates": [],
             "notifications": [],
             "notification_groups": empty_notification_groups(),
             "warnings": [],
+            "dry_run_targets": [],
+            "dry_run_unavailable": [],
         }
         source_label = str(source.get("label") or "fallback source")
         source_name = str(source.get("source_label") or source_label)
+        current_field = str(source.get("current_field") or "tag")
         report_only_suffix = "; report only, no manifest update will be planned" if source.get("report_only") else ""
         latest = latest_source_version(self.get_fallback_version_source_values(source))
         if latest is None:
@@ -1452,6 +1531,7 @@ class UpdateReportGenerator:
             latest_family = latest_version.release[:2]
             configured_family = highest_configured.release[:2]
             if latest_family > configured_family:
+                target_version = version_family_label(latest_version)
                 message = (
                     f"{prefix}new {source_label} version family `{latest_raw}` is available "
                     f"from {source_name} "
@@ -1459,6 +1539,20 @@ class UpdateReportGenerator:
                     f"manual review required{report_only_suffix}"
                 )
                 add_grouped_notification(result, "major_version", message)
+                if current_field in ("tag", "version"):
+                    result["dry_run_targets"].append(
+                        {
+                            "version": target_version,
+                            "latest_raw": latest_raw,
+                            "source_label": source_label,
+                            "message": message,
+                        }
+                    )
+                else:
+                    result["dry_run_unavailable"].append(
+                        f"{prefix}manual-review dry-run diff could not be generated for {source_label} "
+                        f"`{latest_raw}` because `{current_field}` is not a local `options` tag/version field"
+                    )
             else:
                 result["current"].append(
                     f"{prefix}{source_label} latest version family from {source_name} is current "
@@ -1467,6 +1561,8 @@ class UpdateReportGenerator:
             return result
 
         if latest_version.major > highest_configured.major:
+            target_depth = max(1, len(highest_configured.release))
+            target_version = version_family_label(latest_version, target_depth)
             message = (
                 f"{prefix}new {source_label} major version `{latest_raw}` is available "
                 f"from {source_name} "
@@ -1475,6 +1571,20 @@ class UpdateReportGenerator:
             )
             result["major_updates"].append(message)
             add_grouped_notification(result, "major_version", message)
+            if current_field in ("tag", "version"):
+                result["dry_run_targets"].append(
+                    {
+                        "version": target_version,
+                        "latest_raw": latest_raw,
+                        "source_label": source_label,
+                        "message": message,
+                    }
+                )
+            else:
+                result["dry_run_unavailable"].append(
+                    f"{prefix}manual-review dry-run diff could not be generated for {source_label} "
+                    f"`{latest_raw}` because `{current_field}` is not a local `options` tag/version field"
+                )
         else:
             result["current"].append(
                 f"{prefix}{source_label} latest major version from {source_name} is current "
@@ -1695,7 +1805,7 @@ class UpdateReportGenerator:
         raw_options: list[Any],
         prefix: str,
         manifest_path: str,
-    ) -> dict[str, list[Any]]:
+    ) -> dict[str, Any]:
         result = {
             "updates": [],
             "current": [],
@@ -1704,6 +1814,7 @@ class UpdateReportGenerator:
             "notification_groups": empty_notification_groups(),
             "warnings": [],
             "planned_changes": [],
+            "dry_run_targets": [],
         }
         if not options:
             return result
@@ -1811,6 +1922,14 @@ class UpdateReportGenerator:
             )
             result["major_updates"].append(message)
             add_grouped_notification(result, "major_version", message)
+            result["dry_run_targets"].append(
+                {
+                    "version": latest_name,
+                    "latest_raw": latest_name,
+                    "source_label": product_label,
+                    "message": message,
+                }
+            )
 
         return result
 
@@ -1898,6 +2017,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         eol_updates: list[str] = []
         major_updates: list[str] = []
         planned_changes: list[dict[str, Any]] = []
+        dry_run_changes: list[dict[str, Any]] = []
         updates_without_local_diff: list[str] = []
         repo_expects_image = False
         repo_expects_helm = False
@@ -1957,6 +2077,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             expects_helm = not external and not parent_name
             expects_options = not external and not parent_name and service_type != "infrastructure"
             comparable = False
+            manual_review_targets: list[dict[str, Any]] = []
+            dry_run_unavailable_messages: list[str] = []
+            fallback_dry_run_start: int | None = None
 
             repo_service_types.add(service_type)
             repo_external = repo_external and external
@@ -1979,6 +2102,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     merge_notification_groups(notification_groups, parent_result.get("notification_groups"))
                     major_updates.extend(parent_result["major_updates"])
                     planned_changes.extend(parent_result["planned_changes"])
+                    dry_run_changes.extend(parent_result["dry_run_changes"])
                     comparable = comparable or bool(parent_result["comparable"])
                 except Exception as exc:
                     warnings.append(f"{prefix}parent service version lookup failed for `{parent_name}`: {exc}")
@@ -1995,11 +2119,13 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 merge_notification_groups(notification_groups, eol_result.get("notification_groups"))
                 warnings.extend(eol_result["warnings"])
                 planned_changes.extend(eol_result["planned_changes"])
+                manual_review_targets.extend(eol_result.get("dry_run_targets") or [])
             except Exception as exc:
                 warnings.append(f"{prefix}endoflife.date lookup failed: {exc}")
 
             fallback_source = generator.resolve_fallback_version_source(repo, label)
             if fallback_source is not None:
+                fallback_dry_run_start = len(dry_run_changes)
                 try:
                     source_result = generator.check_fallback_version_source(
                         fallback_source,
@@ -2014,6 +2140,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     notifications.extend(source_result["notifications"])
                     merge_notification_groups(notification_groups, source_result.get("notification_groups"))
                     warnings.extend(source_result["warnings"])
+                    manual_review_targets.extend(source_result.get("dry_run_targets") or [])
+                    dry_run_unavailable_messages.extend(source_result.get("dry_run_unavailable") or [])
                     comparable = comparable or bool(
                         source_result["current"]
                         or source_result["major_updates"]
@@ -2107,6 +2235,55 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                 updates_without_local_diff.append(
                                     f"{message}; additional image comparison is report only"
                                 )
+
+                    if can_plan_image_changes and manual_review_targets:
+                        existing_versions = {
+                            str(option.get("version"))
+                            for option in raw_options
+                            if isinstance(option, dict) and option.get("version") is not None
+                        }
+                        dry_run_versions_seen: set[str] = set()
+                        for target_info in manual_review_targets:
+                            target_version = str(target_info.get("version") or "").strip()
+                            if not target_version or target_version in existing_versions:
+                                continue
+                            if target_version in dry_run_versions_seen:
+                                continue
+                            dry_run_versions_seen.add(target_version)
+
+                            if generator.is_owner_image(image):
+                                target_tag = generator.latest_wodby_tag(
+                                    target_version, published_tags, valid_stabilities or set()
+                                )
+                            else:
+                                target_tag = generator.latest_external_tag(target_version, published_tags, None)
+
+                            if target_tag is None:
+                                warnings.append(
+                                    f"{image_prefix}manual-review dry-run diff could not be generated "
+                                    f"for version `{target_version}` because no published image tag was found"
+                                )
+                                continue
+
+                            dry_run_changes.append(
+                                make_dry_run_option_add(
+                                    manifest_path,
+                                    target_version,
+                                    target_tag,
+                                    (
+                                        f"{image_prefix}dry-run option for "
+                                        f"{target_info.get('source_label') or 'manual-review source'} "
+                                        f"`{target_info.get('latest_raw') or target_version}`; manual review required"
+                                    ),
+                                    {
+                                        "image": image,
+                                        "image_version": target_version,
+                                        "source_label": target_info.get("source_label"),
+                                        "latest_raw": target_info.get("latest_raw"),
+                                        "service_label": label if multiple_manifests else "",
+                                    },
+                                )
+                            )
             elif images and not options:
                 if expects_options:
                     warnings.append(
@@ -2132,6 +2309,28 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         )
                         major_updates.append(message)
                         add_repo_notification(notifications, notification_groups, "helm_major_version", message)
+                        if isinstance(raw_helm, dict) and raw_helm.get("version") is not None:
+                            dry_run_changes.append(
+                                make_planned_change(
+                                    manifest_path,
+                                    "helm.version",
+                                    "version",
+                                    raw_helm.get("version"),
+                                    latest_chart,
+                                    message,
+                                    {
+                                        "change_type": "helm_chart",
+                                        "dry_run": True,
+                                        "helm_chart": helm_chart,
+                                        "service_label": label if multiple_manifests else "",
+                                    },
+                                )
+                            )
+                        else:
+                            warnings.append(
+                                f"{prefix}manual-review Helm dry-run diff could not be generated "
+                                f"because no local `helm.version` field exists in `{manifest_path}`"
+                            )
                     else:
                         message = (
                             f"{prefix}a new chart version is available `{latest_chart}` (current: `{helm_version}`)"
@@ -2164,6 +2363,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     warnings.append(f"{prefix}no local `helm` section was found for this non-external service")
                 else:
                     warnings.append(f"{prefix}local `helm` section is incomplete and cannot be compared automatically")
+
+            if dry_run_unavailable_messages and (
+                fallback_dry_run_start is None or len(dry_run_changes) == fallback_dry_run_start
+            ):
+                warnings.extend(dry_run_unavailable_messages)
 
             if not comparable and not external:
                 repo_comparable = False
@@ -2219,6 +2423,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 major_updates=major_updates,
                 planned_changes=planned_changes,
                 planned_diffs=render_planned_diffs(planned_changes),
+                dry_run_changes=dry_run_changes,
+                dry_run_diffs=render_planned_diffs(dry_run_changes),
                 updates_without_local_diff=updates_without_local_diff,
                 planned_release=planned_release,
             )
@@ -2266,6 +2472,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 for result in results
                 if result.planned_release and result.planned_release.get("status") == "planned"
             ),
+            "dry_run_updates": sum(1 for result in results if result.dry_run_diffs),
             "release_blockers": sum(
                 1
                 for result in results
@@ -2310,6 +2517,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     )
     lines.append(f"- Repos without EOL data: {report['totals'].get('missing_eol_notifications', 0)}")
     lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
+    lines.append(f"- Repos with manual-review dry-run diffs: {report['totals'].get('dry_run_updates', 0)}")
     lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
     if "applied_updates" in report["totals"]:
         lines.append(f"- Repos updated by workflow: {report['totals'].get('applied_updates', 0)}")
@@ -2345,6 +2553,25 @@ def render_markdown(report: dict[str, Any]) -> str:
                     lines.extend(str(planned_diff).splitlines())
                     lines.append("```")
                     lines.append("")
+            lines.append("")
+
+    dry_run_items = [
+        item
+        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+        if item.get("dry_run_diffs")
+    ]
+    if dry_run_items:
+        lines.append("## Manual Review Dry Run Diffs")
+        lines.append("")
+        lines.append("These diffs are generated for manual review only. The workflow does not apply them.")
+        lines.append("")
+        for item in dry_run_items:
+            lines.append(f"### {item['repo']}")
+            for dry_run_diff in item["dry_run_diffs"]:
+                lines.append("```diff")
+                lines.extend(str(dry_run_diff).splitlines())
+                lines.append("```")
+                lines.append("")
             lines.append("")
 
     apply_result_items = [
@@ -2518,6 +2745,7 @@ def main() -> int:
         f"{report['totals']['special']} repos are special cases, "
         f"{report['totals']['notifications']} repos have manual-review notifications, "
         f"{report['totals'].get('planned_releases', 0)} repos have planned git tag releases, "
+        f"{report['totals'].get('dry_run_updates', 0)} repos have manual-review dry-run diffs, "
         f"{report['totals'].get('release_blockers', 0)} repos have git tag release blockers, "
         f"{report['totals']['external_excluded']} external repos were excluded."
     )

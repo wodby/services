@@ -291,6 +291,8 @@ jobs:
               print("- Status: missing `service.yml`")
           elif details and (details.get("planned_diffs") or details["updates"]):
               print("- Status: update candidate")
+          elif details and details.get("dry_run_diffs"):
+              print("- Status: manual review dry-run candidate")
           elif details and details.get("notifications"):
               print("- Status: manual review notification")
           elif details and (
@@ -326,6 +328,16 @@ jobs:
                       print("```")
                       print("")
               print("")
+
+          if details and details.get("dry_run_diffs"):
+              print("### Manual Review Dry Run Diffs")
+              print("These diffs are generated for manual review only. The workflow does not apply them.")
+              print("")
+              for dry_run_diff in details["dry_run_diffs"]:
+                  print("```diff")
+                  print(str(dry_run_diff).rstrip())
+                  print("```")
+                  print("")
 
           apply_result = (details or {}).get("apply_result") or {}
           if apply_result:
@@ -558,6 +570,8 @@ jobs:
               print("- Status: missing `service.yml`")
           elif details and (details.get("planned_diffs") or details["updates"]):
               print("- Status: update candidate")
+          elif details and details.get("dry_run_diffs"):
+              print("- Status: manual review dry-run candidate")
           elif details and details.get("notifications"):
               print("- Status: manual review notification")
           elif details and (
@@ -593,6 +607,16 @@ jobs:
                       print("```")
                       print("")
               print("")
+
+          if details and details.get("dry_run_diffs"):
+              print("### Manual Review Dry Run Diffs")
+              print("These diffs are generated for manual review only. The workflow does not apply them.")
+              print("")
+              for dry_run_diff in details["dry_run_diffs"]:
+                  print("```diff")
+                  print(str(dry_run_diff).rstrip())
+                  print("```")
+                  print("")
 
           apply_result = (details or {}).get("apply_result") or {}
           if apply_result:
