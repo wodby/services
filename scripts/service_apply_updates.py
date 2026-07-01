@@ -198,6 +198,8 @@ def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]
         data = YAML_RT.load(path.read_text()) or {}
         if not isinstance(data, dict):
             raise RuntimeError(f"{manifest_path} did not decode to a mapping")
+        if data.get("from") and any(change.get("change_type") == "eol" for change in changes):
+            raise RuntimeError(f"{manifest_path} is a child service manifest; refusing to apply option EOL updates")
 
         for change in changes:
             set_yaml_value(data, change)

@@ -580,14 +580,12 @@ def human_change_description(change: dict[str, Any]) -> str:
 
 def render_release_description(
     _repo: str,
-    previous_tag: str,
+    _previous_tag: str,
     next_tag: str,
     planned_changes: list[dict[str, Any]],
 ) -> str:
     lines = [
         f"Release {next_tag}",
-        "",
-        f"Previous tag: {previous_tag}",
         "",
         "Changes:",
     ]
@@ -2107,21 +2105,22 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 except Exception as exc:
                     warnings.append(f"{prefix}parent service version lookup failed for `{parent_name}`: {exc}")
 
-            try:
-                eol_result = generator.check_eol_options(
-                    repo, label, service_type, options, raw_options, prefix, manifest_path
-                )
-                updates.extend(eol_result["updates"])
-                current.extend(eol_result["current"])
-                eol_updates.extend(eol_result["updates"])
-                major_updates.extend(eol_result["major_updates"])
-                notifications.extend(eol_result["notifications"])
-                merge_notification_groups(notification_groups, eol_result.get("notification_groups"))
-                warnings.extend(eol_result["warnings"])
-                planned_changes.extend(eol_result["planned_changes"])
-                manual_review_targets.extend(eol_result.get("dry_run_targets") or [])
-            except Exception as exc:
-                warnings.append(f"{prefix}endoflife.date lookup failed: {exc}")
+            if not parent_name:
+                try:
+                    eol_result = generator.check_eol_options(
+                        repo, label, service_type, options, raw_options, prefix, manifest_path
+                    )
+                    updates.extend(eol_result["updates"])
+                    current.extend(eol_result["current"])
+                    eol_updates.extend(eol_result["updates"])
+                    major_updates.extend(eol_result["major_updates"])
+                    notifications.extend(eol_result["notifications"])
+                    merge_notification_groups(notification_groups, eol_result.get("notification_groups"))
+                    warnings.extend(eol_result["warnings"])
+                    planned_changes.extend(eol_result["planned_changes"])
+                    manual_review_targets.extend(eol_result.get("dry_run_targets") or [])
+                except Exception as exc:
+                    warnings.append(f"{prefix}endoflife.date lookup failed: {exc}")
 
             fallback_source = generator.resolve_fallback_version_source(repo, label)
             if fallback_source is not None:
