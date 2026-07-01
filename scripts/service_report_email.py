@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event", default="", help="GitHub Actions event name.")
     parser.add_argument("--sha", default="", help="Git commit SHA.")
     parser.add_argument("--workflow-result", default="", help="Aggregated update job result.")
+    parser.add_argument("--artifact-result", default="", help="Report artifact download step result.")
     return parser.parse_args()
 
 
@@ -63,9 +64,20 @@ def workflow_result_failed(workflow_result: str) -> bool:
     return False
 
 
-def event_counts(reports: list[dict[str, Any]], items: list[dict[str, Any]], workflow_result: str) -> dict[str, int]:
+def artifact_result_failed(artifact_result: str) -> bool:
+    text = artifact_result.strip().lower()
+    return bool(text and text not in SUCCESSFUL_WORKFLOW_RESULTS)
+
+
+def event_counts(
+    reports: list[dict[str, Any]],
+    items: list[dict[str, Any]],
+    workflow_result: str,
+    artifact_result: str,
+) -> dict[str, int]:
     return {
         "workflow_failures": 1 if workflow_result_failed(workflow_result) else 0,
+        "artifact_failures": 1 if artifact_result_failed(artifact_result) else 0,
         "updates": sum(1 for item in items if item.get("updates")),
         "major_version_notifications": sum(
             1 for item in items if (item.get("notification_groups") or {}).get("major_version")
@@ -213,6 +225,7 @@ def build_body(
     event: str,
     sha: str,
     workflow_result: str,
+    artifact_result: str,
 ) -> str:
     lines: list[str] = []
     lines.append("Service update report events were detected.")
@@ -221,6 +234,7 @@ def build_body(
     lines.append(f"Event: {event or 'unknown'}")
     lines.append(f"Commit: {sha or 'unknown'}")
     lines.append(f"Update job result: {workflow_result or 'unknown'}")
+    lines.append(f"Artifact download result: {artifact_result or 'unknown'}")
     lines.append(f"Report artifacts: {len(reports)}")
     lines.append(f"Repos reported: {len(items)}")
     lines.append("")
@@ -233,6 +247,12 @@ def build_body(
         lines.append("Workflow Failure")
         lines.append("")
         lines.append("One or more report jobs did not complete successfully. Check the run URL above.")
+        lines.append("")
+
+    if counts["artifact_failures"]:
+        lines.append("Report Artifact Failure")
+        lines.append("")
+        lines.append("Report artifacts could not be downloaded. Check the workflow run logs for collection errors.")
         lines.append("")
 
     append_repo_planned_changes(lines, items)
@@ -491,8 +511,9 @@ def build_html_body(
     event: str,
     sha: str,
     workflow_result: str,
+    artifact_result: str,
 ) -> str:
-    status_color = "#991b1b" if counts["workflow_failures"] else "#166534"
+    status_color = "#991b1b" if counts["workflow_failures"] or counts["artifact_failures"] else "#166534"
     summary_rows = "".join(
         "<tr>"
         f"<td style=\"padding:6px 12px;border-bottom:1px solid #e5e7eb;color:#374151;\">{html.escape(key.replace('_', ' '))}</td>"
@@ -516,6 +537,7 @@ def build_html_body(
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Event</td><td style=\"padding:2px 0;\">{html.escape(event or 'unknown')}</td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Commit</td><td style=\"padding:2px 0;\">{html.escape(sha or 'unknown')}</td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Update job result</td><td style=\"padding:2px 0;color:{status_color};\"><strong>{html.escape(workflow_result or 'unknown')}</strong></td></tr>",
+        f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Artifact download result</td><td style=\"padding:2px 0;color:{status_color};\"><strong>{html.escape(artifact_result or 'unknown')}</strong></td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Report artifacts</td><td style=\"padding:2px 0;\">{len(reports)}</td></tr>",
         f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">Repos reported</td><td style=\"padding:2px 0;\">{len(items)}</td></tr>",
         "</table>",
@@ -530,6 +552,12 @@ def build_html_body(
             "<strong>Workflow Failure</strong><br>One or more report jobs did not complete successfully. Check the run URL above."
             "</div>"
         )
+    if counts["artifact_failures"]:
+        body.append(
+            "<div style=\"margin:20px 0;padding:12px;border:1px solid #fecaca;border-radius:6px;background:#fef2f2;color:#991b1b;\">"
+            "<strong>Report Artifact Failure</strong><br>Report artifacts could not be downloaded. Check the workflow run logs for collection errors."
+            "</div>"
+        )
     body.append(html_planned_changes(items))
     body.append(html_apply_results(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
@@ -540,7 +568,7 @@ def build_html_body(
 
 
 def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str:
-    status = "failed" if counts["workflow_failures"] else "events"
+    status = "failed" if counts["workflow_failures"] or counts["artifact_failures"] else "events"
     short_sha = sha[:7] if sha else "unknown"
     return (
         f"[services] report {status}: "
@@ -604,7 +632,7 @@ def main() -> int:
     args = parse_args()
     reports = load_reports(Path(args.reports_dir))
     items = repo_items(reports)
-    counts = event_counts(reports, items, args.workflow_result)
+    counts = event_counts(reports, items, args.workflow_result, args.artifact_result)
 
     if not has_email_worthy_events(counts):
         print("No email-worthy service report events were found.")
@@ -619,6 +647,7 @@ def main() -> int:
         event=args.event,
         sha=args.sha,
         workflow_result=args.workflow_result,
+        artifact_result=args.artifact_result,
     )
     html_body = build_html_body(
         reports,
@@ -628,6 +657,7 @@ def main() -> int:
         event=args.event,
         sha=args.sha,
         workflow_result=args.workflow_result,
+        artifact_result=args.artifact_result,
     )
     print(subject)
     print("")
