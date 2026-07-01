@@ -13,7 +13,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
-from service_update_report import render_markdown
+from service_update_report import latest_stable_semver_tag, render_markdown
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
@@ -182,8 +182,47 @@ def remote_tag_exists(repo_dir: Path, tag: str) -> bool:
     return bool(process.stdout.strip())
 
 
+def remote_tags(repo_dir: Path) -> set[str]:
+    process = run_git(repo_dir, "ls-remote", "--tags", "--refs", "origin", check=False)
+    if process.returncode != 0:
+        output = (process.stderr or process.stdout).strip()
+        raise RuntimeError(f"unable to list remote tags: {output}")
+    return {
+        line.split("refs/tags/", 1)[1]
+        for line in process.stdout.splitlines()
+        if "refs/tags/" in line
+    }
+
+
 def local_tag_exists(repo_dir: Path, tag: str) -> bool:
     return run_git(repo_dir, "rev-parse", "--verify", f"refs/tags/{tag}", check=False).returncode == 0
+
+
+def validate_planned_release(repo_dir: Path, release: dict[str, Any]) -> None:
+    tag = normalize(release.get("tag"))
+    previous_tag = normalize(release.get("previous_tag"))
+    if not tag or not previous_tag:
+        raise RuntimeError("planned release must include tag and previous_tag")
+
+    tags = remote_tags(repo_dir)
+    if tag in tags:
+        return
+
+    latest_tag = latest_stable_semver_tag(tags)
+    if latest_tag is None:
+        raise RuntimeError("no existing stable semantic git tag was found; planned release cannot be validated")
+
+    remote_previous_tag, prefix, remote_previous_version = latest_tag
+    expected_tag = f"{prefix}{remote_previous_version.major}.{remote_previous_version.minor}.{remote_previous_version.micro + 1}"
+    if remote_previous_tag != previous_tag:
+        raise RuntimeError(
+            f"planned release is stale: report used previous tag {previous_tag}, "
+            f"but latest remote stable tag is {remote_previous_tag}; regenerate the report"
+        )
+    if tag != expected_tag:
+        raise RuntimeError(
+            f"planned release tag {tag} no longer matches next patch tag {expected_tag}; regenerate the report"
+        )
 
 
 def configure_git_identity(repo_dir: Path) -> None:
@@ -243,6 +282,8 @@ def commit_push_and_tag(
 
     if local_tag_exists(repo_dir, tag):
         raise RuntimeError(f"local tag {tag} already exists but remote tag was not found")
+
+    validate_planned_release(repo_dir, release)
 
     description = str(release.get("description") or f"Release {tag}")
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
@@ -304,6 +345,7 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
         item["apply_result"] = result
         return report, result
 
+    validate_planned_release(repo_dir, release)
     changed_files = apply_manifest_changes(repo_dir, planned_changes)
     result = commit_push_and_tag(repo_dir, args.repo, release, changed_files)
     item["apply_result"] = result
