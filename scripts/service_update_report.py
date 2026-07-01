@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 import yaml
@@ -22,9 +22,8 @@ README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service
 README_MANAGED_SERVICES_HEADING = "## Managed services"
 EXCLUDED_README_REPOS = {"service"}
 DOCKER_TOKEN_URL = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
-DOCKER_TAGS_URL = "https://registry-1.docker.io/v2/{repo}/tags/list?n=10000"
 GHCR_TOKEN_URL = "https://ghcr.io/token?scope=repository:{repo}:pull"
-GHCR_TAGS_URL = "https://ghcr.io/v2/{repo}/tags/list?n=10000"
+REGISTRY_TAGS_URL = "https://{registry}/v2/{repo}/tags/list?n=10000"
 GITHUB_CONTENTS_URL = "https://api.github.com/repos/{owner}/{repo}/contents/{path}"
 GITHUB_TAGS_URL = "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
 WODBY_CHART_URL = "https://raw.githubusercontent.com/{owner}/charts/main/{chart}/Chart.yaml"
@@ -1182,7 +1181,7 @@ class UpdateReportGenerator:
         if cache_key in self._image_change_notes_cache:
             return copy.deepcopy(self._image_change_notes_cache[cache_key])
 
-        if not image.startswith(f"{self.owner}/"):
+        if not self.is_owner_image(image):
             self._image_change_notes_cache[cache_key] = []
             return []
 
@@ -1192,7 +1191,8 @@ class UpdateReportGenerator:
             self._image_change_notes_cache[cache_key] = []
             return []
 
-        repo = image.split("/", 1)[1]
+        _registry, image_repo = self.image_repository(image)
+        repo = image_repo.split("/", 1)[1]
         try:
             notes = [self.build_wodby_tag_note_tree(repo, stability_tag, image_version)]
         except Exception as exc:
@@ -1212,40 +1212,118 @@ class UpdateReportGenerator:
         cache_key = ("dockerhub", repo)
         if cache_key in self._registry_tags_cache:
             return self._registry_tags_cache[cache_key]
-
         token = self.fetch(DOCKER_TOKEN_URL.format(repo=repo)).json()["token"]
-        response = self.session.get(
-            DOCKER_TAGS_URL.format(repo=repo),
+        return self.get_registry_v2_tags(
+            "registry-1.docker.io",
+            repo,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=120,
+            cache_key=cache_key,
         )
-        response.raise_for_status()
-        tags = response.json().get("tags", []) or []
-        self._registry_tags_cache[cache_key] = tags
-        return tags
 
     def get_ghcr_tags(self, repo: str) -> list[str]:
         cache_key = ("ghcr", repo)
         if cache_key in self._registry_tags_cache:
             return self._registry_tags_cache[cache_key]
-
         token = self.fetch(GHCR_TOKEN_URL.format(repo=repo)).json()["token"]
-        response = self.session.get(
-            GHCR_TAGS_URL.format(repo=repo),
+        return self.get_registry_v2_tags(
+            "ghcr.io",
+            repo,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=120,
+            cache_key=cache_key,
         )
+
+    @staticmethod
+    def bearer_challenge_params(header: str) -> dict[str, str]:
+        if not header.lower().startswith("bearer "):
+            return {}
+        return {key: value for key, value in re.findall(r'(\w+)="([^"]*)"', header)}
+
+    def registry_bearer_token(self, registry: str, repo: str, challenge: str) -> str | None:
+        params = self.bearer_challenge_params(challenge)
+        realm = params.get("realm")
+        if not realm:
+            return None
+
+        token_params = {}
+        if params.get("service"):
+            token_params["service"] = params["service"]
+        token_params["scope"] = params.get("scope") or f"repository:{repo}:pull"
+        response = self.session.get(realm, params=token_params, timeout=60)
         response.raise_for_status()
-        tags = response.json().get("tags", []) or []
-        self._registry_tags_cache[cache_key] = tags
+        payload = response.json()
+        token = payload.get("token") or payload.get("access_token")
+        return str(token) if token else None
+
+    def get_registry_v2_tags(
+        self,
+        registry: str,
+        repo: str,
+        *,
+        headers: dict[str, str] | None = None,
+        cache_key: tuple[str, str] | None = None,
+    ) -> list[str]:
+        key = cache_key or (registry, repo)
+        if key in self._registry_tags_cache:
+            return self._registry_tags_cache[key]
+
+        tags: list[str] = []
+        url: str | None = REGISTRY_TAGS_URL.format(registry=registry, repo=repo)
+        request_headers = dict(headers or {})
+        while url:
+            response = self.session.get(url, headers=request_headers, timeout=120)
+            if response.status_code == 401:
+                token = self.registry_bearer_token(registry, repo, response.headers.get("WWW-Authenticate", ""))
+                if token:
+                    request_headers["Authorization"] = f"Bearer {token}"
+                    response = self.session.get(url, headers=request_headers, timeout=120)
+            response.raise_for_status()
+            tags.extend(str(tag) for tag in (response.json().get("tags") or []))
+            next_url = (response.links.get("next") or {}).get("url")
+            url = urljoin(url, next_url) if next_url else None
+
+        self._registry_tags_cache[key] = tags
         return tags
 
+    @staticmethod
+    def image_repository(image: str) -> tuple[str, str]:
+        reference = str(image or "").strip()
+        if not reference:
+            raise RuntimeError("empty image reference")
+
+        reference = reference.split("@", 1)[0]
+        parts = reference.split("/")
+        if len(parts) == 1:
+            repo = f"library/{parts[0]}"
+            registry = "docker.io"
+        else:
+            first = parts[0]
+            if "." in first or ":" in first or first == "localhost":
+                registry = first
+                repo = "/".join(parts[1:])
+            else:
+                registry = "docker.io"
+                repo = reference
+
+        repo_parts = repo.rsplit("/", 1)
+        last_part = repo_parts[-1]
+        if ":" in last_part:
+            last_part = last_part.split(":", 1)[0]
+            repo = "/".join(repo_parts[:-1] + [last_part]) if len(repo_parts) > 1 else last_part
+        if not repo:
+            raise RuntimeError(f"unable to determine image repository for {image}")
+        return registry, repo
+
+    def is_owner_image(self, image: str) -> bool:
+        registry, repo = self.image_repository(image)
+        return registry in ("docker.io", "registry-1.docker.io", "index.docker.io") and repo.startswith(f"{self.owner}/")
+
     def get_image_tags(self, image: str) -> list[str]:
-        if image.startswith("ghcr.io/"):
-            return self.get_ghcr_tags(image[len("ghcr.io/"):])
-        if image.count("/") == 1 and "." not in image.split("/")[0]:
-            return self.get_dockerhub_tags(image)
-        raise RuntimeError(f"unsupported image registry for {image}")
+        registry, repo = self.image_repository(image)
+        if registry in ("docker.io", "registry-1.docker.io", "index.docker.io"):
+            return self.get_dockerhub_tags(repo)
+        if registry == "ghcr.io":
+            return self.get_ghcr_tags(repo)
+        return self.get_registry_v2_tags(registry, repo)
 
     def get_tailscale_stable_versions(self) -> list[str]:
         cache_key = ("tailscale-stable", "versions")
@@ -1419,7 +1497,7 @@ class UpdateReportGenerator:
             return self.get_dockerhub_tags(repo)
         if registry == "ghcr.io":
             return self.get_ghcr_tags(repo)
-        raise RuntimeError(f"unsupported OCI registry for {reference}")
+        return self.get_registry_v2_tags(registry, repo)
 
     def latest_stable_version_tag(self, published_tags: list[str]) -> str | None:
         candidates: list[tuple[Version, str]] = []
@@ -1859,7 +1937,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             from_version_constraint = raw_service_data.get("fromVersionConstraint")
             from_version = raw_service_data.get("fromVersion")
             images = generator.get_service_images(service_data)
-            image = images[0] if images else None
+            primary_image = images[0] if images else None
             options = service_data.get("options") or []
             raw_options = raw_service_data.get("options") or []
             duplicate_versions = duplicate_option_versions(raw_options)
@@ -1885,7 +1963,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             repo_expects_image = repo_expects_image or expects_image
             repo_expects_helm = repo_expects_helm or expects_helm
             repo_expects_options = repo_expects_options or expects_options
-            repo_missing_expected_image = repo_missing_expected_image or (expects_image and not image)
+            repo_missing_expected_image = repo_missing_expected_image or (expects_image and not primary_image)
             repo_missing_expected_helm = repo_missing_expected_helm or (expects_helm and not helm)
             repo_missing_expected_options = repo_missing_expected_options or (expects_options and not options)
 
@@ -1948,27 +2026,34 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
 
             if len(images) > 1:
                 warnings.append(
-                    f"{prefix}multiple explicit container images were found in workloads; comparing only the first one `{image}`"
+                    f"{prefix}multiple explicit container images were found in workloads; "
+                    f"manifest tag updates will only be planned from the primary image `{primary_image}`"
                 )
 
-            if image and options:
+            if images and options:
                 comparable = True
-                try:
-                    published_tags = generator.get_image_tags(image)
-                    valid_stabilities = None
-                    if image.startswith(f"{args.owner}/"):
-                        valid_stabilities = generator.get_github_tags(args.owner, image.split("/", 1)[1])
-                except Exception as exc:
-                    warnings.append(f"{prefix}image lookup failed for `{image}`: {exc}")
-                    published_tags = None
-                    valid_stabilities = None
+                for image_index, image in enumerate(images):
+                    can_plan_image_changes = image_index == 0
+                    image_prefix = prefix if len(images) == 1 else f"{prefix}[image {image}] "
+                    try:
+                        published_tags = generator.get_image_tags(image)
+                        valid_stabilities = None
+                        if generator.is_owner_image(image):
+                            _registry, image_repo = generator.image_repository(image)
+                            valid_stabilities = generator.get_github_tags(args.owner, image_repo.split("/", 1)[1])
+                    except Exception as exc:
+                        warnings.append(f"{image_prefix}image lookup failed for `{image}`: {exc}")
+                        published_tags = None
+                        valid_stabilities = None
 
-                if published_tags is not None:
+                    if published_tags is None:
+                        continue
+
                     for option in options:
                         wanted = str(option.get("version"))
                         configured = option.get("tag") or wanted
                         configured_exists = configured in published_tags if configured else False
-                        if image.startswith(f"{args.owner}/"):
+                        if generator.is_owner_image(image):
                             target = generator.latest_wodby_tag(wanted, published_tags, valid_stabilities or set())
                         else:
                             target = generator.latest_external_tag(wanted, published_tags, configured)
@@ -1976,21 +2061,21 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         if target is None:
                             if configured and configured_exists:
                                 current.append(
-                                    f"{prefix}no newer published image tag family was found for version `{wanted}`; current tag `{configured}` exists"
+                                    f"{image_prefix}no newer published image tag family was found for version `{wanted}`; current tag `{configured}` exists"
                                 )
                             else:
                                 warnings.append(
-                                    f"{prefix}no published image tag found for version `{wanted}` (current: `{configured}`)"
+                                    f"{image_prefix}no published image tag found for version `{wanted}` (current: `{configured}`)"
                                 )
                         elif configured == target:
-                            current.append(f"{prefix}tag `{configured}` is the latest published tag for version `{wanted}`")
+                            current.append(f"{image_prefix}tag `{configured}` is the latest published tag for version `{wanted}`")
                         else:
                             message = (
-                                f"{prefix}updating tag to `{target}` for version `{wanted}` (current: `{configured}`)"
+                                f"{image_prefix}updating tag to `{target}` for version `{wanted}` (current: `{configured}`)"
                             )
                             updates.append(message)
                             raw_option = raw_option_index.get(wanted)
-                            if raw_option is not None:
+                            if raw_option is not None and can_plan_image_changes:
                                 planned_changes.append(
                                     make_planned_change(
                                         manifest_path,
@@ -2014,14 +2099,18 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                         },
                                     )
                                 )
+                            elif raw_option is None:
+                                updates_without_local_diff.append(
+                                    f"{message}; no unique local `options` entry for version `{wanted}` in `{manifest_path}`"
+                                )
                             else:
                                 updates_without_local_diff.append(
-                                    f"{message}; no local `options` entry for version `{wanted}` in `{manifest_path}`"
+                                    f"{message}; additional image comparison is report only"
                                 )
-            elif image and not options:
+            elif images and not options:
                 if expects_options:
                     warnings.append(
-                        f"{prefix}explicit image `{image}` is defined, but there are no local `options` entries to compare against published tags"
+                        f"{prefix}explicit images are defined, but there are no local `options` entries to compare against published tags"
                     )
             elif options and expects_image:
                 warnings.append(f"{prefix}service options are defined, but no explicit container image was found in local workloads")
