@@ -680,4 +680,4 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --event "${{ github.event_name }}" \
             --sha "${{ github.sha }}" \
-            --workflow-result "non-child=${{ needs.update-non-child-services.result }}, child=${{ needs.update-child-services.result }}"
+            --workflow-result "discover=${{ needs.discover-repos.result }}, non-child=${{ needs.update-non-child-services.result }}, child=${{ needs.update-child-services.result }}"

@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 
+SUCCESSFUL_WORKFLOW_RESULTS = {"success", "skipped"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send a consolidated service update report email.")
     parser.add_argument("reports_dir", help="Directory containing downloaded service report artifacts.")
@@ -35,9 +38,22 @@ def repo_items(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda item: str(item.get("repo") or ""))
 
 
+def workflow_result_failed(workflow_result: str) -> bool:
+    text = workflow_result.strip()
+    if not text:
+        return False
+
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    for part in parts:
+        result = part.rsplit("=", 1)[-1].strip().lower()
+        if result not in SUCCESSFUL_WORKFLOW_RESULTS:
+            return True
+    return False
+
+
 def event_counts(reports: list[dict[str, Any]], items: list[dict[str, Any]], workflow_result: str) -> dict[str, int]:
     return {
-        "workflow_failures": 0 if workflow_result in ("", "success") else 1,
+        "workflow_failures": 1 if workflow_result_failed(workflow_result) else 0,
         "updates": sum(1 for item in items if item.get("updates")),
         "major_updates": sum(1 for item in items if item.get("major_updates")),
         "planned_releases": sum(
@@ -414,7 +430,7 @@ def build_html_body(
 
 
 def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str:
-    status = "failed" if workflow_result not in ("", "success") else "events"
+    status = "failed" if counts["workflow_failures"] else "events"
     short_sha = sha[:7] if sha else "unknown"
     return (
         f"[services] report {status}: "
