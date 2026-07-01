@@ -225,7 +225,6 @@ def commit_push_and_tag(
         commit_message = f"Update service manifest for {tag}"
         run_git(repo_dir, "commit", "-m", commit_message)
         commit_sha = run_git(repo_dir, "rev-parse", "HEAD").stdout.strip()
-        run_git(repo_dir, "push", "origin", f"HEAD:{branch}")
         committed = True
     else:
         commit_sha = run_git(repo_dir, "rev-parse", "HEAD").stdout.strip()
@@ -250,15 +249,24 @@ def commit_push_and_tag(
         fh.write(description.rstrip() + "\n")
         release_notes_path = fh.name
 
+    tag_created = False
+    push_succeeded = False
     try:
         run_git(repo_dir, "tag", "-a", tag, "-F", release_notes_path)
-        run_git(repo_dir, "push", "origin", tag)
+        tag_created = True
+        if committed:
+            run_git(repo_dir, "push", "--atomic", "origin", f"HEAD:{branch}", f"refs/tags/{tag}")
+        else:
+            run_git(repo_dir, "push", "origin", f"refs/tags/{tag}")
+        push_succeeded = True
     finally:
+        if tag_created and not push_succeeded:
+            run_git(repo_dir, "tag", "-d", tag, check=False)
         Path(release_notes_path).unlink(missing_ok=True)
 
     if committed:
         status = "applied"
-        message = f"Committed manifest changes and pushed tag {tag}."
+        message = f"Committed manifest changes and atomically pushed branch and tag {tag}."
     else:
         status = "tagged"
         message = f"No manifest diff remained; pushed tag {tag} on the current HEAD."
