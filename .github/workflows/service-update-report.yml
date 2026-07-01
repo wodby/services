@@ -186,6 +186,10 @@ jobs:
         if: steps.apply-scope.outputs.apply_needed == 'true'
         env:
           SERVICE_UPDATE_TOKEN: ${{ secrets.WODBOT_GITHUB_PAT || secrets.WODBY_GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: ${{ secrets.GIT_AUTHOR_NAME }}
+          GIT_AUTHOR_EMAIL: ${{ secrets.GIT_AUTHOR_EMAIL }}
+          GIT_COMMITTER_NAME: ${{ secrets.GIT_COMMITTER_NAME || secrets.GIT_AUTHOR_NAME }}
+          GIT_COMMITTER_EMAIL: ${{ secrets.GIT_COMMITTER_EMAIL || secrets.GIT_AUTHOR_EMAIL }}
         run: |
           if [[ -z "$SERVICE_UPDATE_TOKEN" ]]; then
             echo "::error::WODBOT_GITHUB_PAT or WODBY_GITHUB_TOKEN is required to push service repo updates."
