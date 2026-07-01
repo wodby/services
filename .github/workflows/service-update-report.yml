@@ -28,67 +28,85 @@ jobs:
     outputs:
       repos: ${{ steps.discover.outputs.repos }}
       repo_count: ${{ steps.discover.outputs.repo_count }}
+      non_child_repos: ${{ steps.discover.outputs.non_child_repos }}
+      non_child_repo_count: ${{ steps.discover.outputs.non_child_repo_count }}
+      child_repos: ${{ steps.discover.outputs.child_repos }}
+      child_repo_count: ${{ steps.discover.outputs.child_repo_count }}
 
     steps:
       - name: Check Out Repository
         uses: actions/checkout@v5
+
+      - name: Set Up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Discovery Dependencies
+        run: python -m pip install --upgrade pip packaging pyyaml requests
 
       - name: Build Service Matrix
         id: discover
         env:
           OWNER: wodby
           REPO_FILTER: ${{ inputs.repo_filter || '' }}
+          WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WODBY_GITHUB_TOKEN: ${{ secrets.WODBY_GITHUB_TOKEN }}
         run: |
           python - <<'PY'
           import json
           import os
-          import re
           from pathlib import Path
 
+          from scripts.service_update_report import UpdateReportGenerator, load_service_repos
+
           owner = os.environ["OWNER"]
-          repo_filter = os.environ.get("REPO_FILTER", "")
-          readme_text = Path("README.md").read_text()
-
-          def managed_services_table_text(text):
-              lines = text.splitlines()
-              start = None
-              for index, line in enumerate(lines):
-                  if line.strip().lower() == "## managed services":
-                      start = index + 1
-                      break
-              if start is None:
-                  return ""
-
-              section_lines = []
-              for line in lines[start:]:
-                  if line.startswith("## "):
-                      break
-                  if line.lstrip().startswith("|"):
-                      section_lines.append(line)
-              return "\n".join(section_lines)
-
-          repo_source_text = managed_services_table_text(readme_text) or readme_text
-          pattern = re.compile(
-              rf"https://github\.com/{re.escape(owner)}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)",
-              re.IGNORECASE,
-          )
-          excluded_repos = {"service"}
-          repos = sorted(set(pattern.findall(repo_source_text)) - excluded_repos)
-
-          if repo_filter:
-              matcher = re.compile(repo_filter)
-              repos = [repo for repo in repos if matcher.search(repo)]
-
+          repos = load_service_repos(Path("README.md"), owner, os.environ.get("REPO_FILTER", ""))
           if not repos:
-              raise SystemExit(f"No README-listed service repos matched repo_filter={repo_filter!r}")
+              raise SystemExit(f"No README-listed service repos matched repo_filter={os.environ.get('REPO_FILTER', '')!r}")
+
+          generator = UpdateReportGenerator(owner)
+          non_child_repos = []
+          child_repos = []
+
+          for repo in repos:
+              manifest_paths = generator.get_repo_manifest_paths(repo)
+              is_child = False
+              for manifest_path in manifest_paths:
+                  service_data = generator.get_service_data(repo, manifest_path) or {}
+                  if service_data.get("external"):
+                      continue
+                  if service_data.get("from"):
+                      is_child = True
+                      break
+
+              if is_child:
+                  child_repos.append(repo)
+              else:
+                  non_child_repos.append(repo)
 
           repos_json = json.dumps(repos, separators=(",", ":"))
+          non_child_repos_json = json.dumps(non_child_repos, separators=(",", ":"))
+          child_repos_json = json.dumps(child_repos, separators=(",", ":"))
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
               fh.write(f"repo_count={len(repos)}\n")
               fh.write(f"repos={repos_json}\n")
+              fh.write(f"non_child_repo_count={len(non_child_repos)}\n")
+              fh.write(f"non_child_repos={non_child_repos_json}\n")
+              fh.write(f"child_repo_count={len(child_repos)}\n")
+              fh.write(f"child_repos={child_repos_json}\n")
 
           print(f"Selected {len(repos)} repo(s):")
           for repo in repos:
+              print(f"- {repo}")
+          print("")
+          print(f"Non-child phase ({len(non_child_repos)} repo(s)):")
+          for repo in non_child_repos:
+              print(f"- {repo}")
+          print("")
+          print(f"Child phase ({len(child_repos)} repo(s)):")
+          for repo in child_repos:
               print(f"- {repo}")
           PY
 
@@ -96,22 +114,37 @@ jobs:
         env:
           REPOS_JSON: ${{ steps.discover.outputs.repos }}
           REPO_COUNT: ${{ steps.discover.outputs.repo_count }}
+          NON_CHILD_REPOS_JSON: ${{ steps.discover.outputs.non_child_repos }}
+          NON_CHILD_REPO_COUNT: ${{ steps.discover.outputs.non_child_repo_count }}
+          CHILD_REPOS_JSON: ${{ steps.discover.outputs.child_repos }}
+          CHILD_REPO_COUNT: ${{ steps.discover.outputs.child_repo_count }}
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
           import os
 
           repos = json.loads(os.environ["REPOS_JSON"])
+          non_child_repos = json.loads(os.environ["NON_CHILD_REPOS_JSON"])
+          child_repos = json.loads(os.environ["CHILD_REPOS_JSON"])
           print("## Update Scope")
           print("")
           print(f"- Selected repos: {os.environ['REPO_COUNT']}")
           for repo in repos:
               print(f"  - `{repo}`")
+          print("")
+          print(f"- Non-child phase: {os.environ['NON_CHILD_REPO_COUNT']}")
+          for repo in non_child_repos:
+              print(f"  - `{repo}`")
+          print("")
+          print(f"- Child phase: {os.environ['CHILD_REPO_COUNT']}")
+          for repo in child_repos:
+              print(f"  - `{repo}`")
           PY
 
-  update-report:
-    name: Update Service / ${{ matrix.repo }}
+  update-non-child-services:
+    name: Update Non-Child Service / ${{ matrix.repo }}
     needs: discover-repos
+    if: ${{ needs.discover-repos.outputs.non_child_repo_count != '0' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -121,7 +154,265 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        repo: ${{ fromJSON(needs.discover-repos.outputs.repos) }}
+        repo: ${{ fromJSON(needs.discover-repos.outputs.non_child_repos) }}
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v5
+
+      - name: Set Up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: python -m pip install --upgrade pip packaging pyyaml requests ruamel.yaml
+
+      - name: Generate Service Update Report
+        env:
+          WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WODBY_GITHUB_TOKEN: ${{ secrets.WODBY_GITHUB_TOKEN }}
+        run: |
+          if [[ ! "$SERVICE_REPO" =~ ^service-[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid service repo from matrix; expected a service-* repository name."
+            exit 1
+          fi
+          REPORT_DIR="$RUNNER_TEMP/service-update-report/$SERVICE_REPO"
+          echo "REPORT_DIR=$REPORT_DIR" >> "$GITHUB_ENV"
+          python scripts/service_update_report.py \
+            --readme README.md \
+            --owner wodby \
+            --repo-filter "^${SERVICE_REPO}$" \
+            --output-dir "$REPORT_DIR"
+
+      - name: Determine Apply Scope
+        id: apply-scope
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          repo = os.environ["SERVICE_REPO"]
+          report_dir = Path(os.environ["REPORT_DIR"])
+          report = json.loads((report_dir / "service-update-report.json").read_text())
+          details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
+          release = (details or {}).get("planned_release") or {}
+          planned_changes = (details or {}).get("planned_changes") or []
+          apply_needed = bool(planned_changes and release.get("status") == "planned")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
+              fh.write(f"apply_needed={str(apply_needed).lower()}\n")
+          print(f"apply_needed={apply_needed}")
+          PY
+
+      - name: Check Out Service Repository
+        if: steps.apply-scope.outputs.apply_needed == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: wodby/${{ matrix.repo }}
+          path: service-repo
+          fetch-depth: 0
+          token: ${{ secrets.WODBOT_GITHUB_PAT || secrets.WODBY_GITHUB_TOKEN || github.token }}
+
+      - name: Apply, Commit, Push, and Tag
+        if: steps.apply-scope.outputs.apply_needed == 'true'
+        env:
+          SERVICE_UPDATE_TOKEN: ${{ secrets.WODBOT_GITHUB_PAT || secrets.WODBY_GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: ${{ secrets.GIT_AUTHOR_NAME }}
+          GIT_AUTHOR_EMAIL: ${{ secrets.GIT_AUTHOR_EMAIL }}
+          GIT_COMMITTER_NAME: ${{ secrets.GIT_COMMITTER_NAME || secrets.GIT_AUTHOR_NAME }}
+          GIT_COMMITTER_EMAIL: ${{ secrets.GIT_COMMITTER_EMAIL || secrets.GIT_AUTHOR_EMAIL }}
+        run: |
+          if [[ -z "$SERVICE_UPDATE_TOKEN" ]]; then
+            echo "::error::WODBOT_GITHUB_PAT or WODBY_GITHUB_TOKEN is required to push service repo updates."
+            exit 1
+          fi
+
+          python scripts/service_apply_updates.py \
+            --report-dir "$REPORT_DIR" \
+            --owner wodby \
+            --repo "$SERVICE_REPO" \
+            --repo-dir service-repo
+
+      - name: Print Full Report
+        if: always()
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["REPORT_DIR"]) / "service-update-report.md"
+          print(report_path.read_text())
+          PY
+
+      - name: Publish Step Summary
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          from pathlib import Path
+
+          repo = os.environ["SERVICE_REPO"]
+          report_dir = Path(os.environ["REPORT_DIR"])
+          report = json.loads((report_dir / "service-update-report.json").read_text())
+          details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
+
+          print(f"## Update Result: `{repo}`")
+          print("")
+          print("- Scope: single service repo")
+          print("- Full report: printed in the `Print Full Report` step log")
+          print("")
+
+          if repo in report.get("external_services", []):
+              print("- Status: external service excluded")
+          elif repo in report["missing_service_yml"]:
+              print("- Status: missing `service.yml`")
+          elif details and (details.get("planned_diffs") or details["updates"]):
+              print("- Status: update candidate")
+          elif details and details.get("notifications"):
+              print("- Status: manual review notification")
+          elif details and (
+              details["warnings"]
+              or not details.get("comparable", False)
+              or (details.get("expects_image") and not details["has_image"])
+              or (details.get("expects_helm") and not details["has_helm"])
+              or (details.get("expects_options") and not details["has_options"])
+          ):
+              print("- Status: special case")
+          else:
+              print("- Status: no changes")
+          print("")
+
+          release = (details or {}).get("planned_release") or {}
+          if release.get("status") == "planned" or (details and details.get("planned_diffs")):
+              print("### Manifest Change and Git Tag")
+              if release.get("status") == "planned":
+                  print(f"- Git tag: `{release['tag']}`")
+                  print(f"- Previous tag: `{release['previous_tag']}`")
+                  print("")
+                  print("#### Tag Description")
+                  print(str(release.get("description") or "").rstrip())
+                  print("")
+              elif release.get("status") == "blocked":
+                  print(f"- Git tag release blocked: {release.get('reason') or 'release tag could not be calculated'}")
+                  print("")
+              if details and details.get("planned_diffs"):
+                  print("#### Manifest Diff")
+                  for planned_diff in details["planned_diffs"]:
+                      print("```diff")
+                      print(str(planned_diff).rstrip())
+                      print("```")
+                      print("")
+              print("")
+
+          apply_result = (details or {}).get("apply_result") or {}
+          if apply_result:
+              print("### Apply Result")
+              print(f"- Status: `{apply_result.get('status', 'unknown')}`")
+              if apply_result.get("message"):
+                  print(f"- Message: {apply_result['message']}")
+              if apply_result.get("branch"):
+                  print(f"- Branch: `{apply_result['branch']}`")
+              if apply_result.get("commit"):
+                  print(f"- Commit: `{apply_result['commit']}`")
+              if apply_result.get("tag"):
+                  print(f"- Tag: `{apply_result['tag']}`")
+              changed_files = apply_result.get("changed_files") or []
+              if changed_files:
+                  print(f"- Changed files: {', '.join(f'`{path}`' for path in changed_files)}")
+              print("")
+
+          if details and details.get("updates_without_local_diff"):
+              print("### Updates Without Local Manifest Diff")
+              for message in details["updates_without_local_diff"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details["current"]:
+              print("### Current State")
+              for message in details["current"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details["warnings"]:
+              print("### Warnings")
+              for message in details["warnings"]:
+                  print(f"- {message}")
+              print("")
+
+          if details and details.get("notifications"):
+              print("### Manual Review Notifications")
+              for message in details["notifications"]:
+                  print(f"- {message}")
+              print("")
+
+          if repo in report["missing_service_yml"]:
+              print("### Missing or Unreadable `service.yml`")
+              print(f"- `{repo}`")
+              print("")
+
+          if details and (
+              (details.get("expects_image") and not details["has_image"])
+              or (details.get("expects_helm") and not details["has_helm"])
+              or (details.get("expects_options") and not details["has_options"])
+          ):
+              print("### Missing Comparison Inputs")
+              if details.get("expects_image") and not details["has_image"]:
+                  print("- No explicit image comparison target")
+              if details.get("expects_helm") and not details["has_helm"]:
+                  print("- No local `helm`")
+              if details.get("expects_options") and not details["has_options"]:
+                  print("- No local `options`")
+              print("")
+
+          if (
+              details
+              and details.get("comparable")
+              and not report["updates"]
+              and not details["warnings"]
+              and repo not in report["missing_service_yml"]
+          ):
+              print("No update candidates were found.")
+              print("")
+
+          print("The full markdown report is printed in the job log above.")
+          PY
+
+      - name: Upload Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-update-report-${{ matrix.repo }}
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  update-child-services:
+    name: Update Child Service / ${{ matrix.repo }}
+    needs:
+      - discover-repos
+      - update-non-child-services
+    if: >-
+      ${{
+        always()
+        && needs.discover-repos.result == 'success'
+        && needs.discover-repos.outputs.child_repo_count != '0'
+        && (
+          needs.update-non-child-services.result == 'success'
+          || needs.update-non-child-services.result == 'skipped'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SERVICE_REPO: ${{ matrix.repo }}
+
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        repo: ${{ fromJSON(needs.discover-repos.outputs.child_repos) }}
 
     steps:
       - name: Check Out Repository
@@ -359,7 +650,8 @@ jobs:
     name: Notify Report Events
     needs:
       - discover-repos
-      - update-report
+      - update-non-child-services
+      - update-child-services
     if: always()
     runs-on: ubuntu-latest
 
@@ -388,4 +680,4 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --event "${{ github.event_name }}" \
             --sha "${{ github.sha }}" \
-            --workflow-result "${{ needs.update-report.result }}"
+            --workflow-result "non-child=${{ needs.update-non-child-services.result }}, child=${{ needs.update-child-services.result }}"
