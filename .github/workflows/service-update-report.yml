@@ -69,22 +69,43 @@ jobs:
           generator = UpdateReportGenerator(owner)
           non_child_repos = []
           child_repos = []
+          selected_repos = set(repos)
+          repo_dependencies = {}
 
           for repo in repos:
               manifest_paths = generator.get_repo_manifest_paths(repo)
               is_child = False
+              dependencies = set()
               for manifest_path in manifest_paths:
                   service_data = generator.get_service_data(repo, manifest_path) or {}
                   if service_data.get("external"):
                       continue
                   if service_data.get("from"):
                       is_child = True
-                      break
+                      parent_repo = generator.service_name_to_repo(str(service_data["from"]))
+                      if parent_repo in selected_repos:
+                          dependencies.add(parent_repo)
 
+              repo_dependencies[repo] = sorted(dependencies)
               if is_child:
                   child_repos.append(repo)
               else:
                   non_child_repos.append(repo)
+
+          ordered_child_repos = []
+          remaining_child_repos = set(child_repos)
+          while remaining_child_repos:
+              ready = sorted(
+                  repo
+                  for repo in remaining_child_repos
+                  if all(parent not in remaining_child_repos for parent in repo_dependencies.get(repo, []))
+              )
+              if not ready:
+                  cycle = ", ".join(sorted(remaining_child_repos))
+                  raise SystemExit(f"Child service dependency cycle detected: {cycle}")
+              ordered_child_repos.extend(ready)
+              remaining_child_repos.difference_update(ready)
+          child_repos = ordered_child_repos
 
           repos_json = json.dumps(repos, separators=(",", ":"))
           non_child_repos_json = json.dumps(non_child_repos, separators=(",", ":"))
@@ -105,7 +126,7 @@ jobs:
           for repo in non_child_repos:
               print(f"- {repo}")
           print("")
-          print(f"Child phase ({len(child_repos)} repo(s)):")
+          print(f"Child phase dependency order ({len(child_repos)} repo(s)):")
           for repo in child_repos:
               print(f"- {repo}")
           PY
@@ -419,7 +440,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 1
       matrix:
         repo: ${{ fromJSON(needs.discover-repos.outputs.child_repos) }}
 
