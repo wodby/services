@@ -17,6 +17,7 @@ from service_update_report import UpdateReportGenerator, latest_stable_semver_ta
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
+CRD_CHART_PATH_RE = re.compile(r"^crdCharts\[name=(?P<name>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
 YAML_RT = YAML()
 YAML_RT.preserve_quotes = True
 
@@ -154,6 +155,30 @@ def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
         if normalize(current) != expected_before:
             raise RuntimeError(f"helm.version changed since report generation: expected {expected_before}, found {current}")
         helm["version"] = replacement_value(current, after)
+        return
+
+    match = CRD_CHART_PATH_RE.match(path)
+    if match and key == match.group("field"):
+        crd_charts = data.get("crdCharts")
+        if not isinstance(crd_charts, list):
+            raise RuntimeError(f"{path} cannot be updated because crdCharts is not a list")
+        wanted_name = match.group("name")
+        matches = [
+            chart
+            for chart in crd_charts
+            if isinstance(chart, dict) and normalize(chart.get("name")) == wanted_name
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(f"{path} cannot be updated because name {wanted_name} appears more than once")
+        if not matches:
+            raise RuntimeError(f"{path} cannot be updated because name {wanted_name} was not found")
+        crd_chart = matches[0]
+        current = crd_chart.get(key)
+        if normalize(current) != expected_before:
+            raise RuntimeError(
+                f"{path} changed since report generation: expected {expected_before}, found {current}"
+            )
+        crd_chart[key] = replacement_value(current, after)
         return
 
     match = OPTION_PATH_RE.match(path)

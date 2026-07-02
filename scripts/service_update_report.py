@@ -437,6 +437,28 @@ def raw_options_by_version(raw_options: list[Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def duplicate_crd_chart_names(crd_charts: list[Any]) -> set[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for chart in crd_charts:
+        if not isinstance(chart, dict) or chart.get("name") is None:
+            continue
+        name = str(chart["name"])
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    return duplicates
+
+
+def raw_crd_charts_by_name(raw_crd_charts: list[Any]) -> dict[str, dict[str, Any]]:
+    duplicates = duplicate_crd_chart_names(raw_crd_charts)
+    return {
+        str(chart.get("name")): chart
+        for chart in raw_crd_charts
+        if isinstance(chart, dict) and chart.get("name") is not None and str(chart.get("name")) not in duplicates
+    }
+
+
 def render_planned_diffs(planned_changes: list[dict[str, Any]]) -> list[str]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for change in planned_changes:
@@ -539,6 +561,9 @@ def human_change_description(change: dict[str, Any]) -> str:
     if change_type == "helm_chart":
         chart = str(change.get("helm_chart") or "chart")
         return f"{prefix}Helm chart `{chart}` updated from `{before}` to `{after}`."
+    if change_type == "crd_helm_chart":
+        chart = str(change.get("crd_chart") or change.get("helm_chart") or "CRD chart")
+        return f"{prefix}CRD Helm chart `{chart}` updated from `{before}` to `{after}`."
     if change_type == "eol":
         product = str(change.get("product_label") or "").strip()
         version = str(change.get("version") or "unknown")
@@ -1553,6 +1578,120 @@ class UpdateReportGenerator:
                 best_raw = raw
         return best_raw
 
+    def helm_version_exists(self, source: str, chart: str, version: str) -> bool:
+        if source.startswith("oci://"):
+            reference = chart if chart.startswith("oci://") else source
+            return version in self.get_oci_tags(reference)
+
+        if source not in self._helm_index_cache:
+            index_url = f"{source.rstrip('/')}/index.yaml"
+            payload = yaml.safe_load(self.fetch(index_url).content.decode("utf-8", "ignore"))
+            self._helm_index_cache[source] = payload
+
+        index = self._helm_index_cache[source]
+        chart_name = chart.split("/", 1)[1] if "/" in chart else chart
+        entries = index.get("entries", {}).get(chart_name, [])
+        return any(str(entry.get("version")) == version for entry in entries)
+
+    def check_crd_chart_updates(
+        self,
+        crd_charts: Any,
+        raw_crd_charts: Any,
+        target_version: str,
+        prefix: str,
+        manifest_path: str,
+        service_label: str,
+    ) -> dict[str, Any]:
+        result = {
+            "updates": [],
+            "current": [],
+            "warnings": [],
+            "planned_changes": [],
+            "updates_without_local_diff": [],
+        }
+        if not crd_charts:
+            return result
+        if not isinstance(crd_charts, list):
+            result["warnings"].append(f"{prefix}`crdCharts` is not a list and cannot be compared automatically")
+            return result
+        if not isinstance(raw_crd_charts, list):
+            raw_crd_charts = []
+
+        duplicate_names = duplicate_crd_chart_names(raw_crd_charts)
+        if duplicate_names:
+            names = ", ".join(f"`{name}`" for name in sorted(duplicate_names))
+            result["warnings"].append(
+                f"{prefix}duplicate `crdCharts` name entries found for {names}; "
+                "automated CRD chart updates for those names are disabled"
+            )
+        raw_crd_chart_index = raw_crd_charts_by_name(raw_crd_charts)
+
+        for crd_chart in crd_charts:
+            if not isinstance(crd_chart, dict):
+                result["warnings"].append(f"{prefix}`crdCharts` contains a non-mapping entry")
+                continue
+
+            name = str(crd_chart.get("name") or "").strip()
+            chart_source = crd_chart.get("source")
+            chart = crd_chart.get("chart") or chart_source
+            current_version = crd_chart.get("version")
+            display = name or str(chart or "unnamed CRD chart")
+
+            if not name:
+                result["warnings"].append(
+                    f"{prefix}CRD Helm chart `{display}` has no `name`; automated updates are disabled"
+                )
+                continue
+            if not chart_source or not chart or current_version is None:
+                result["warnings"].append(
+                    f"{prefix}CRD Helm chart `{display}` is incomplete and cannot be compared automatically"
+                )
+                continue
+
+            current_version = str(current_version)
+            if current_version == target_version:
+                result["current"].append(
+                    f"{prefix}CRD Helm chart `{display}` already matches main Helm chart target `{target_version}`"
+                )
+                continue
+
+            if not self.helm_version_exists(str(chart_source), str(chart), target_version):
+                result["warnings"].append(
+                    f"{prefix}CRD Helm chart `{display}` does not publish version `{target_version}`; "
+                    f"leaving current version `{current_version}`"
+                )
+                continue
+
+            message = (
+                f"{prefix}updating CRD chart `{display}` to `{target_version}` "
+                f"(current: `{current_version}`)"
+            )
+            result["updates"].append(message)
+            raw_crd_chart = raw_crd_chart_index.get(name)
+            if raw_crd_chart is not None and raw_crd_chart.get("version") is not None:
+                result["planned_changes"].append(
+                    make_planned_change(
+                        manifest_path,
+                        f"crdCharts[name={name}].version",
+                        "version",
+                        raw_crd_chart.get("version"),
+                        target_version,
+                        message,
+                        {
+                            "change_type": "crd_helm_chart",
+                            "helm_chart": chart,
+                            "crd_chart": display,
+                            "service_label": service_label,
+                        },
+                    )
+                )
+            else:
+                result["updates_without_local_diff"].append(
+                    f"{message}; no unique local `crdCharts` entry with a `version` field in `{manifest_path}`"
+                )
+
+        return result
+
     def latest_wodby_tag(self, wanted: str, published_tags: list[str], valid_stabilities: set[str]) -> str | None:
         def pick(exact_only: bool) -> str | None:
             candidates: list[tuple[Version | None, Version | None, str]] = []
@@ -1963,6 +2102,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             helm_source = helm.get("source") if helm else None
             helm_chart = (helm.get("chart") or helm_source) if helm else None
             helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
+            crd_charts = service_data.get("crdCharts")
+            raw_crd_charts = raw_service_data.get("crdCharts")
             expects_image = not external and not parent_name and service_type != "infrastructure"
             expects_helm = not external and not parent_name
             expects_options = not external and not parent_name and service_type != "infrastructure"
@@ -2129,6 +2270,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
 
             if helm and helm_source and helm_chart and helm_version:
                 comparable = True
+                planned_helm_target: str | None = None
                 try:
                     latest_chart = generator.get_helm_latest(helm_source, helm_chart)
                     if latest_chart is None:
@@ -2165,12 +2307,31 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                     },
                                 )
                             )
+                            planned_helm_target = latest_chart
                         else:
                             updates_without_local_diff.append(
                                 f"{message}; no local `helm.version` field in `{manifest_path}`"
                             )
                 except Exception as exc:
                     warnings.append(f"{prefix}helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
+
+                if planned_helm_target is not None:
+                    try:
+                        crd_result = generator.check_crd_chart_updates(
+                            crd_charts,
+                            raw_crd_charts,
+                            planned_helm_target,
+                            prefix,
+                            manifest_path,
+                            label if multiple_manifests else "",
+                        )
+                        updates.extend(crd_result["updates"])
+                        current.extend(crd_result["current"])
+                        warnings.extend(crd_result["warnings"])
+                        planned_changes.extend(crd_result["planned_changes"])
+                        updates_without_local_diff.extend(crd_result["updates_without_local_diff"])
+                    except Exception as exc:
+                        warnings.append(f"{prefix}CRD Helm chart lookup failed for target `{planned_helm_target}`: {exc}")
             elif expects_helm:
                 if not helm:
                     warnings.append(f"{prefix}no local `helm` section was found for this non-external service")
