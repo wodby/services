@@ -47,6 +47,13 @@ Before publishing a service for others to use, review:
 | WordPress PHP | [wodby/service-wordpress-php](https://github.com/wodby/service-wordpress-php) |
 | Laravel PHP | [wodby/service-laravel-php](https://github.com/wodby/service-laravel-php) |
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
+| Python | [wodby/service-python](https://github.com/wodby/service-python) |
+| Django | [wodby/service-django](https://github.com/wodby/service-django) |
+| FastAPI | [wodby/service-fastapi](https://github.com/wodby/service-fastapi) |
+| Flask | [wodby/service-flask](https://github.com/wodby/service-flask) |
+| Ruby | [wodby/service-ruby](https://github.com/wodby/service-ruby) |
+| Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
+| Go | [wodby/service-go](https://github.com/wodby/service-go) |
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | Dagster | [wodby/service-dagster](https://github.com/wodby/service-dagster) |
