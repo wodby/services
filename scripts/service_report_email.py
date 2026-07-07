@@ -98,6 +98,9 @@ def event_counts(
         "release_blockers": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "blocked"
         ),
+        "boilerplate_updates": sum(1 for item in items if item.get("boilerplate_updates")),
+        "boilerplate_warnings": sum(1 for item in items if item.get("boilerplate_warnings")),
+        "boilerplate_drift": sum(1 for item in items if item.get("boilerplate_diffs")),
         "applied_updates": sum(
             1
             for item in items
@@ -209,6 +212,41 @@ def append_repo_dry_run_changes(lines: list[str], items: list[dict[str, Any]]) -
         lines.append("")
 
 
+def append_repo_boilerplate_review(lines: list[str], items: list[dict[str, Any]]) -> None:
+    selected = [
+        (
+            item,
+            item.get("boilerplate_updates") or [],
+            item.get("boilerplate_warnings") or [],
+            item.get("boilerplate_diffs") or [],
+        )
+        for item in items
+        if item.get("boilerplate_updates") or item.get("boilerplate_warnings") or item.get("boilerplate_diffs")
+    ]
+    if not selected:
+        return
+
+    lines.append("Boilerplate and Build Template Review")
+    lines.append("")
+    lines.append("These checks are report only. The workflow does not apply boilerplate or build template changes.")
+    lines.append("")
+    for item, updates, warnings, diffs in selected:
+        lines.append(f"{item['repo']}:")
+        if updates:
+            lines.append("review items:")
+            for message in updates:
+                lines.append(f"- {message}")
+        if warnings:
+            lines.append("warnings:")
+            for message in warnings:
+                lines.append(f"- {message}")
+        if diffs:
+            lines.append("configured boilerplate diffs:")
+            for diff in diffs:
+                lines.extend(str(diff).rstrip().splitlines())
+        lines.append("")
+
+
 def append_repo_apply_results(lines: list[str], items: list[dict[str, Any]]) -> None:
     selected = [(item, item.get("apply_result") or {}) for item in items if item.get("apply_result")]
     if not selected:
@@ -274,6 +312,7 @@ def build_body(
 
     append_repo_planned_changes(lines, items)
     append_repo_dry_run_changes(lines, items)
+    append_repo_boilerplate_review(lines, items)
     append_repo_apply_results(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
     append_grouped_notifications(lines, items)
@@ -503,6 +542,48 @@ def html_dry_run_changes(items: list[dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
+def html_boilerplate_review(items: list[dict[str, Any]]) -> str:
+    selected = [
+        (
+            item,
+            item.get("boilerplate_updates") or [],
+            item.get("boilerplate_warnings") or [],
+            item.get("boilerplate_diffs") or [],
+        )
+        for item in items
+        if item.get("boilerplate_updates") or item.get("boilerplate_warnings") or item.get("boilerplate_diffs")
+    ]
+    if not selected:
+        return ""
+
+    blocks = [
+        "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
+        "Boilerplate and Build Template Review</h2>",
+        "<p style=\"margin:0 0 12px 0;color:#4b5563;\">"
+        "These checks are report only. The workflow does not apply boilerplate or build template changes.</p>",
+    ]
+    for item, updates, warnings, diffs in selected:
+        blocks.append(
+            "<div style=\"margin:0 0 18px 0;padding:14px;border:1px solid #d1d5db;border-radius:6px;\">"
+            f"<h3 style=\"margin:0 0 8px 0;font-size:17px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
+        )
+        if updates:
+            blocks.append("<h4 style=\"margin:10px 0 4px 0;font-size:14px;color:#111827;\">Review Items</h4>")
+            blocks.append(html_message_list(updates))
+        if warnings:
+            blocks.append("<h4 style=\"margin:10px 0 4px 0;font-size:14px;color:#111827;\">Warnings</h4>")
+            blocks.append(html_message_list(warnings))
+        if diffs:
+            blocks.append(
+                "<h4 style=\"margin:14px 0 6px 0;font-size:14px;color:#111827;\">"
+                "Configured Boilerplate Diffs</h4>"
+            )
+            for diff in diffs:
+                blocks.append(html_diff(str(diff)))
+        blocks.append("</div>")
+    return "".join(blocks)
+
+
 def html_apply_results(items: list[dict[str, Any]]) -> str:
     selected = [(item, item.get("apply_result") or {}) for item in items if item.get("apply_result")]
     if not selected:
@@ -600,6 +681,7 @@ def build_html_body(
         )
     body.append(html_planned_changes(items))
     body.append(html_dry_run_changes(items))
+    body.append(html_boilerplate_review(items))
     body.append(html_apply_results(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
     body.append(html_grouped_notifications(items))
@@ -615,6 +697,7 @@ def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str
         f"[services] report {status}: "
         f"{counts['updates']} update repos, "
         f"{counts['dry_run_updates']} dry-run repos, "
+        f"{counts['boilerplate_updates']} boilerplate repos, "
         f"{counts['major_version_notifications']} major-version repos, "
         f"{counts['helm_major_version_notifications']} Helm-major repos ({short_sha})"
     )

@@ -3,6 +3,7 @@
 import argparse
 import base64
 import copy
+import difflib
 import json
 import os
 import re
@@ -25,6 +26,7 @@ DOCKER_TOKEN_URL = "https://auth.docker.io/token?service=registry.docker.io&scop
 GHCR_TOKEN_URL = "https://ghcr.io/token?scope=repository:{repo}:pull"
 REGISTRY_TAGS_URL = "https://{registry}/v2/{repo}/tags/list?n=10000"
 GITHUB_CONTENTS_URL = "https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+GITHUB_REF_URL = "https://api.github.com/repos/{owner}/{repo}/git/ref/{ref_path}"
 GITHUB_TAGS_URL = "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
 WODBY_CHART_URL = "https://raw.githubusercontent.com/{owner}/charts/main/{chart}/Chart.yaml"
 ENDOFLIFE_PRODUCTS_URL = "https://endoflife.date/api/v1/products"
@@ -206,6 +208,11 @@ FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):",
 README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
 SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+){0,2})(?:p(?P<portable>\d+))?$")
 TAILSCALE_STABLE_OPTION_RE = re.compile(r'<option value="(?P<version>\d+\.\d+\.\d+)"')
+GITHUB_REPO_URL_RE = re.compile(
+    r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+MAJOR_CONSTRAINT_RE = re.compile(r"^\^v?(?P<major>\d+)(?:\.x)?$")
+BOILERPLATE_DIFF_MAX_LINES = 160
 
 NOTIFICATION_GROUP_ORDER = [
     "major_version",
@@ -254,6 +261,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--readme", default="README.md", help="Path to the README that lists the service repos.")
     parser.add_argument("--owner", default="wodby", help="GitHub owner/org that owns the service repos.")
     parser.add_argument("--repo-filter", default="", help="Optional regex filter for repo names.")
+    parser.add_argument(
+        "--boilerplate-mode",
+        choices=("off", "report"),
+        default="report",
+        help="Whether build template and configured boilerplate checks are included in the report.",
+    )
+    parser.add_argument(
+        "--boilerplate-config",
+        default="boilerplates.yml",
+        help="Optional YAML file with source-to-target boilerplate file comparisons.",
+    )
     parser.add_argument(
         "--output-dir",
         default="artifacts/service-update-report",
@@ -328,6 +346,117 @@ def configured_source_versions(options: list[Any], current_field: str) -> list[t
         if parsed is not None:
             candidates.append((parsed, str(value)))
     return candidates
+
+
+def parse_github_repo_url(value: Any) -> tuple[str, str] | None:
+    match = GITHUB_REPO_URL_RE.match(str(value or "").strip())
+    if not match:
+        return None
+    return match.group("owner"), match.group("repo")
+
+
+def latest_matching_major_tag(tags: set[str], major: int) -> tuple[str, Version] | None:
+    candidates: list[tuple[Version, str]] = []
+    for tag in tags:
+        parsed = parse_source_version(tag)
+        if parsed is None or parsed.is_prerelease or parsed.major != major:
+            continue
+        candidates.append((parsed, tag))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    parsed, tag = candidates[0]
+    return tag, parsed
+
+
+def latest_source_tag(tags: set[str]) -> tuple[str, Version] | None:
+    latest = latest_source_version(tags)
+    if latest is None:
+        return None
+    parsed, tag = latest
+    return tag, parsed
+
+
+def manifest_relative_path(manifest_path: str, value: Any) -> str:
+    path = str(value or "").strip().strip("/")
+    if not path:
+        return path
+    if "/" not in manifest_path:
+        return path
+    manifest_dir = manifest_path.rsplit("/", 1)[0]
+    return f"{manifest_dir}/{path}"
+
+
+def normalize_boilerplate_text(
+    value: str,
+    *,
+    ignore_line_patterns: list[str] | None = None,
+    trim_trailing_whitespace: bool = False,
+) -> str:
+    text = value.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+
+    patterns = [re.compile(pattern) for pattern in ignore_line_patterns or []]
+    normalized_lines = []
+    for line in lines:
+        if any(pattern.search(line) for pattern in patterns):
+            continue
+        normalized_lines.append(line.rstrip() if trim_trailing_whitespace else line)
+    return "\n".join(normalized_lines) + "\n"
+
+
+def render_file_diff(target_path: str, current_text: str, expected_text: str, max_lines: int = BOILERPLATE_DIFF_MAX_LINES) -> str:
+    diff_lines = [
+        f"diff --git a/{target_path} b/{target_path}",
+        *difflib.unified_diff(
+            current_text.splitlines(),
+            expected_text.splitlines(),
+            fromfile=f"a/{target_path}",
+            tofile=f"b/{target_path}",
+            lineterm="",
+        ),
+    ]
+    if len(diff_lines) > max_lines:
+        diff_lines = diff_lines[:max_lines]
+        diff_lines.append(f"... diff truncated after {max_lines} lines")
+    return "\n".join(diff_lines)
+
+
+def load_boilerplate_config(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    config_path = Path(path)
+    if not config_path.is_file():
+        return {}
+    data = yaml.safe_load(config_path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{config_path} did not decode to a mapping")
+    return data
+
+
+def boilerplate_template_entries(config: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = config.get("file_templates") or config.get("templates") or []
+    return [entry for entry in entries if isinstance(entry, dict) and entry.get("enabled", True)]
+
+
+def boilerplate_entry_applies(entry: dict[str, Any], repo: str, service_types: set[str]) -> bool:
+    applies_to = entry.get("applies_to") if isinstance(entry.get("applies_to"), dict) else {}
+    repos = {str(item) for item in applies_to.get("repos") or entry.get("repos") or []}
+    excluded_repos = {str(item) for item in applies_to.get("exclude_repos") or entry.get("exclude_repos") or []}
+    patterns = [str(item) for item in applies_to.get("repo_patterns") or entry.get("repo_patterns") or []]
+    service_type_filters = {str(item) for item in applies_to.get("service_types") or entry.get("service_types") or []}
+
+    if repo in excluded_repos:
+        return False
+    if repos and repo not in repos:
+        return False
+    if patterns and not any(re.search(pattern, repo) for pattern in patterns):
+        return False
+    if service_type_filters and not (service_types & service_type_filters):
+        return False
+    return True
 
 
 def version_family_label(version: Version, depth: int = 2) -> str:
@@ -766,6 +895,11 @@ class RepoResult:
     dry_run_changes: list[dict[str, Any]]
     dry_run_diffs: list[str]
     updates_without_local_diff: list[str]
+    boilerplate_current: list[str]
+    boilerplate_updates: list[str]
+    boilerplate_warnings: list[str]
+    boilerplate_diffs: list[str]
+    boilerplate_checks: list[dict[str, Any]]
     planned_release: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -792,6 +926,11 @@ class RepoResult:
             "dry_run_changes": self.dry_run_changes,
             "dry_run_diffs": self.dry_run_diffs,
             "updates_without_local_diff": self.updates_without_local_diff,
+            "boilerplate_current": self.boilerplate_current,
+            "boilerplate_updates": self.boilerplate_updates,
+            "boilerplate_warnings": self.boilerplate_warnings,
+            "boilerplate_diffs": self.boilerplate_diffs,
+            "boilerplate_checks": self.boilerplate_checks,
             "planned_release": self.planned_release,
         }
 
@@ -811,6 +950,8 @@ class UpdateReportGenerator:
         if token:
             self.github_headers["Authorization"] = f"Bearer {token}"
         self._content_cache: dict[tuple[str, str, str], str | None] = {}
+        self._github_file_cache: dict[tuple[str, str, str, str | None], str | None] = {}
+        self._github_ref_cache: dict[tuple[str, str, str], bool] = {}
         self._github_tags_cache: dict[tuple[str, str], set[str]] = {}
         self._github_tag_note_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._ref_file_cache: dict[tuple[str, str, str], str | None] = {}
@@ -844,9 +985,13 @@ class UpdateReportGenerator:
             self._http_cache[cache_key] = response
         return self._http_cache[cache_key]
 
-    def get_raw_repo_file(self, repo: str, path: str) -> str | None:
-        for branch in ("main", "master"):
-            url = f"https://raw.githubusercontent.com/{self.owner}/{repo}/{branch}/{path}"
+    def get_raw_github_file(self, owner: str, repo: str, path: str, ref: str | None = None) -> str | None:
+        refs = [ref] if ref else ["main", "master"]
+        for candidate_ref in refs:
+            url = (
+                f"https://raw.githubusercontent.com/{owner}/{repo}/"
+                f"{quote(str(candidate_ref), safe='/')}/{quote(path, safe='/')}"
+            )
             response = self.session.get(url, timeout=60)
             if response.status_code == 200:
                 return response.text
@@ -854,21 +999,61 @@ class UpdateReportGenerator:
                 response.raise_for_status()
         return None
 
+    def get_raw_repo_file(self, repo: str, path: str) -> str | None:
+        return self.get_raw_github_file(self.owner, repo, path)
+
+    def get_github_file(self, owner: str, repo: str, path: str, ref: str | None = None) -> str | None:
+        cache_key = (owner, repo, path, ref)
+        if cache_key in self._github_file_cache:
+            return self._github_file_cache[cache_key]
+
+        encoded_path = quote(path, safe="/")
+        url = GITHUB_CONTENTS_URL.format(owner=owner, repo=repo, path=encoded_path)
+        if ref:
+            url = f"{url}?ref={quote(ref, safe='')}"
+        response = self.session.get(url, headers=self.github_headers, timeout=60)
+        if response.status_code in (401, 403, 404):
+            content = self.get_raw_github_file(owner, repo, path, ref)
+            self._github_file_cache[cache_key] = content
+            return content
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("type") == "dir":
+            self._github_file_cache[cache_key] = None
+            return None
+        content = base64.b64decode(payload["content"]).decode("utf-8")
+        self._github_file_cache[cache_key] = content
+        return content
+
     def get_repo_file(self, repo: str, path: str) -> str | None:
         cache_key = (self.owner, repo, path)
         if cache_key in self._content_cache:
             return self._content_cache[cache_key]
-        url = GITHUB_CONTENTS_URL.format(owner=self.owner, repo=repo, path=path)
-        response = self.session.get(url, headers=self.github_headers, timeout=60)
-        if response.status_code in (401, 403, 404):
-            content = self.get_raw_repo_file(repo, path)
-            self._content_cache[cache_key] = content
-            return content
-        response.raise_for_status()
-        payload = response.json()
-        content = base64.b64decode(payload["content"]).decode("utf-8")
+        content = self.get_github_file(self.owner, repo, path)
         self._content_cache[cache_key] = content
         return content
+
+    def github_ref_exists(self, owner: str, repo: str, ref_path: str) -> bool:
+        cache_key = (owner, repo, ref_path)
+        if cache_key in self._github_ref_cache:
+            return self._github_ref_cache[cache_key]
+
+        url = GITHUB_REF_URL.format(owner=owner, repo=repo, ref_path=quote(ref_path, safe="/"))
+        response = self.session.get(url, headers=self.github_headers, timeout=60)
+        if response.status_code == 200:
+            self._github_ref_cache[cache_key] = True
+            return True
+        if response.status_code == 404:
+            self._github_ref_cache[cache_key] = False
+            return False
+        if response.status_code in (401, 403):
+            output = self.git_ls_remote(f"https://github.com/{owner}/{repo}.git", f"refs/{ref_path}")
+            exists = bool(output.strip())
+            self._github_ref_cache[cache_key] = exists
+            return exists
+        response.raise_for_status()
+        self._github_ref_cache[cache_key] = False
+        return False
 
     def get_service_data(self, repo: str, manifest_path: str = "service.yml") -> dict[str, Any] | None:
         cache_key = (repo, manifest_path)
@@ -914,6 +1099,357 @@ class UpdateReportGenerator:
             return service_name
         return f"service-{service_name}"
 
+    def check_build_file_reference(
+        self,
+        repo: str,
+        manifest_path: str,
+        key: str,
+        value: Any,
+        prefix: str,
+    ) -> dict[str, Any]:
+        path = manifest_relative_path(manifest_path, value)
+        message_path = f"`{path}`"
+        check = {
+            "kind": "build_file",
+            "manifest": manifest_path,
+            "field": f"build.{key}",
+            "file": path,
+        }
+        if not path:
+            message = f"{prefix}`build.{key}` is empty"
+            return {**check, "status": "warning", "message": message}
+
+        if self.get_repo_file(repo, path) is None:
+            message = f"{prefix}`build.{key}` references missing file {message_path}"
+            return {**check, "status": "missing", "message": message}
+
+        message = f"{prefix}`build.{key}` file {message_path} exists"
+        return {**check, "status": "current", "message": message}
+
+    def check_build_template_entry(
+        self,
+        template: dict[str, Any],
+        manifest_path: str,
+        prefix: str,
+    ) -> dict[str, Any]:
+        name = str(template.get("name") or "unnamed").strip() or "unnamed"
+        repo_url = str(template.get("repo") or "").strip()
+        title = str(template.get("title") or name).strip()
+        check: dict[str, Any] = {
+            "kind": "build_template",
+            "manifest": manifest_path,
+            "name": name,
+            "title": title,
+            "repo": repo_url,
+        }
+
+        parsed_repo = parse_github_repo_url(repo_url)
+        if parsed_repo is None:
+            message = f"{prefix}build template `{name}` has unsupported repo `{repo_url or 'missing'}`"
+            return {**check, "status": "warning", "message": message}
+
+        template_owner, template_repo = parsed_repo
+        check.update({"owner": template_owner, "repo_name": template_repo})
+        branch = str(template.get("branch") or "").strip()
+        tag = str(template.get("tag") or "").strip()
+        pipeline = str(template.get("pipeline") or "").strip()
+
+        if branch and tag:
+            message = f"{prefix}build template `{name}` defines both `branch` and `tag`; manual review required"
+            return {**check, "status": "warning", "message": message}
+
+        ref_for_pipeline: str | None = None
+        messages: list[str] = []
+        status = "current"
+
+        if branch:
+            check.update({"ref_type": "branch", "ref": branch})
+            if self.github_ref_exists(template_owner, template_repo, f"heads/{branch}"):
+                messages.append(f"{prefix}build template `{name}` branch `{branch}` exists in `{repo_url}`")
+                ref_for_pipeline = branch
+            else:
+                message = f"{prefix}build template `{name}` branch `{branch}` was not found in `{repo_url}`"
+                return {**check, "status": "missing", "message": message}
+        elif tag:
+            check.update({"ref_type": "tag", "ref": tag})
+            tags = self.get_github_tags(template_owner, template_repo)
+            major_match = MAJOR_CONSTRAINT_RE.match(tag)
+            caret_base = parse_caret_constraint(tag)
+            latest_overall = latest_source_tag(tags)
+
+            if major_match:
+                wanted_major = int(major_match.group("major"))
+                latest_major = latest_matching_major_tag(tags, wanted_major)
+                if latest_major is None:
+                    message = (
+                        f"{prefix}build template `{name}` has tag constraint `{tag}`, "
+                        f"but no matching stable tag was found in `{repo_url}`"
+                    )
+                    return {**check, "status": "missing", "message": message}
+                latest_tag, latest_version = latest_major
+                messages.append(
+                    f"{prefix}build template `{name}` tag constraint `{tag}` resolves to `{latest_tag}`"
+                )
+                check.update({"resolved_tag": latest_tag})
+                ref_for_pipeline = latest_tag
+                if latest_overall and latest_overall[1].major > latest_version.major:
+                    overall_tag, _overall_version = latest_overall
+                    messages.append(
+                        f"{prefix}new major build template tag `{overall_tag}` is available for `{name}` "
+                        f"outside constraint `{tag}`; manual review required"
+                    )
+                    status = "update_available"
+            elif caret_base is not None:
+                latest = latest_matching_caret_tag(tags, caret_base)
+                if latest is None:
+                    message = (
+                        f"{prefix}build template `{name}` has tag constraint `{tag}`, "
+                        f"but no matching stable tag was found in `{repo_url}`"
+                    )
+                    return {**check, "status": "missing", "message": message}
+                latest_tag, latest_version = latest
+                messages.append(
+                    f"{prefix}build template `{name}` tag constraint `{tag}` resolves to `{latest_tag}`"
+                )
+                check.update({"resolved_tag": latest_tag})
+                ref_for_pipeline = latest_tag
+                if latest_overall and latest_overall[1] >= caret_upper_bound(caret_base):
+                    overall_tag, _overall_version = latest_overall
+                    messages.append(
+                        f"{prefix}new major build template tag `{overall_tag}` is available for `{name}` "
+                        f"outside constraint `{tag}`; manual review required"
+                    )
+                    status = "update_available"
+            else:
+                parsed_current = parse_source_version(tag)
+                if tag not in tags:
+                    message = f"{prefix}build template `{name}` tag `{tag}` was not found in `{repo_url}`"
+                    return {**check, "status": "missing", "message": message}
+                messages.append(f"{prefix}build template `{name}` tag `{tag}` exists in `{repo_url}`")
+                ref_for_pipeline = tag
+                if parsed_current is not None and latest_overall and latest_overall[1] > parsed_current:
+                    latest_tag, latest_version = latest_overall
+                    if latest_version.major > parsed_current.major:
+                        messages.append(
+                            f"{prefix}new major build template tag `{latest_tag}` is available for `{name}` "
+                            f"(current: `{tag}`); manual review required"
+                        )
+                    else:
+                        messages.append(
+                            f"{prefix}new build template tag `{latest_tag}` is available for `{name}` "
+                            f"(current: `{tag}`); manual review required"
+                        )
+                    status = "update_available"
+        else:
+            message = f"{prefix}build template `{name}` has neither `branch` nor `tag`; ref cannot be evaluated"
+            return {**check, "status": "warning", "message": message}
+
+        if pipeline:
+            check["pipeline"] = pipeline
+            if ref_for_pipeline is None:
+                messages.append(
+                    f"{prefix}build template `{name}` pipeline `{pipeline}` could not be checked without a resolved ref"
+                )
+                if status == "current":
+                    status = "warning"
+            elif self.get_github_file(template_owner, template_repo, pipeline, ref_for_pipeline) is None:
+                messages.append(
+                    f"{prefix}build template `{name}` pipeline `{pipeline}` was not found at `{ref_for_pipeline}`"
+                )
+                status = "warning" if status == "current" else status
+            else:
+                messages.append(
+                    f"{prefix}build template `{name}` pipeline `{pipeline}` exists at `{ref_for_pipeline}`"
+                )
+
+        return {**check, "status": status, "messages": messages, "message": messages[-1] if messages else ""}
+
+    def check_build_boilerplates(
+        self,
+        repo: str,
+        manifest_path: str,
+        service_data: dict[str, Any],
+        prefix: str,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "current": [],
+            "updates": [],
+            "warnings": [],
+            "checks": [],
+        }
+        build = service_data.get("build")
+        if not isinstance(build, dict):
+            return result
+
+        for key in ("dockerfile", "dockerignore"):
+            if build.get(key) is None:
+                continue
+            check = self.check_build_file_reference(repo, manifest_path, key, build.get(key), prefix)
+            result["checks"].append(check)
+            if check["status"] == "current":
+                result["current"].append(check["message"])
+            else:
+                result["warnings"].append(check["message"])
+
+        templates = build.get("templates") or []
+        if templates and not isinstance(templates, list):
+            result["warnings"].append(f"{prefix}`build.templates` is not a list")
+            result["checks"].append(
+                {
+                    "kind": "build_template",
+                    "manifest": manifest_path,
+                    "status": "warning",
+                    "message": f"{prefix}`build.templates` is not a list",
+                }
+            )
+            return result
+
+        for template in templates:
+            if not isinstance(template, dict):
+                message = f"{prefix}`build.templates` contains a non-mapping entry"
+                result["warnings"].append(message)
+                result["checks"].append(
+                    {
+                        "kind": "build_template",
+                        "manifest": manifest_path,
+                        "status": "warning",
+                        "message": message,
+                    }
+                )
+                continue
+            check = self.check_build_template_entry(template, manifest_path, prefix)
+            result["checks"].append(check)
+            messages = check.get("messages") or [check.get("message")]
+            messages = [str(message) for message in messages if message]
+            if check["status"] == "current":
+                result["current"].extend(messages)
+            elif check["status"] == "update_available":
+                warning_messages = [
+                    message
+                    for message in messages
+                    if " was not found " in message or "could not be checked" in message
+                ]
+                current_messages = [
+                    message
+                    for message in messages
+                    if "manual review required" not in message and message not in warning_messages
+                ]
+                update_messages = [message for message in messages if "manual review required" in message]
+                result["current"].extend(current_messages)
+                result["updates"].extend(update_messages or messages)
+                result["warnings"].extend(warning_messages)
+            else:
+                result["warnings"].extend(messages)
+
+        return result
+
+    def evaluate_configured_boilerplates(
+        self,
+        repo: str,
+        service_types: set[str],
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "current": [],
+            "updates": [],
+            "warnings": [],
+            "diffs": [],
+            "checks": [],
+        }
+        for entry in boilerplate_template_entries(config):
+            if not boilerplate_entry_applies(entry, repo, service_types):
+                continue
+
+            name = str(entry.get("name") or "boilerplate").strip() or "boilerplate"
+            source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
+            source_owner = str(source.get("owner") or self.owner)
+            source_repo = str(source.get("repo") or "").strip()
+            source_ref = str(source.get("ref") or "").strip() or None
+            if not source_repo:
+                message = f"configured boilerplate `{name}` has no source repo"
+                result["warnings"].append(message)
+                result["checks"].append({"kind": "file_template", "template": name, "status": "warning", "message": message})
+                continue
+
+            files = entry.get("files") or []
+            if not isinstance(files, list):
+                message = f"configured boilerplate `{name}` has non-list `files`"
+                result["warnings"].append(message)
+                result["checks"].append({"kind": "file_template", "template": name, "status": "warning", "message": message})
+                continue
+
+            for file_entry in files:
+                if not isinstance(file_entry, dict):
+                    message = f"configured boilerplate `{name}` contains a non-mapping file entry"
+                    result["warnings"].append(message)
+                    result["checks"].append({"kind": "file_template", "template": name, "status": "warning", "message": message})
+                    continue
+                source_path = str(file_entry.get("source") or file_entry.get("path") or "").strip()
+                target_path = str(file_entry.get("target") or file_entry.get("path") or source_path).strip()
+                required = bool(file_entry.get("required"))
+                check = {
+                    "kind": "file_template",
+                    "template": name,
+                    "source": f"{source_owner}/{source_repo}:{source_ref or 'default'}:{source_path}",
+                    "file": target_path,
+                }
+
+                if not source_path or not target_path:
+                    message = f"configured boilerplate `{name}` has an empty source or target path"
+                    result["warnings"].append(message)
+                    result["checks"].append({**check, "status": "warning", "message": message})
+                    continue
+
+                target_text = self.get_repo_file(repo, target_path)
+                if target_text is None:
+                    if required:
+                        message = f"configured boilerplate `{name}` requires missing file `{target_path}`"
+                        result["warnings"].append(message)
+                        result["checks"].append({**check, "status": "missing", "message": message})
+                    continue
+
+                source_text = self.get_github_file(source_owner, source_repo, source_path, source_ref)
+                if source_text is None:
+                    message = (
+                        f"configured boilerplate `{name}` source file `{source_path}` was not found "
+                        f"in `{source_owner}/{source_repo}`"
+                    )
+                    result["warnings"].append(message)
+                    result["checks"].append({**check, "status": "warning", "message": message})
+                    continue
+
+                ignore_patterns = list(entry.get("ignore_line_patterns") or []) + list(
+                    file_entry.get("ignore_line_patterns") or []
+                )
+                trim_trailing = bool(entry.get("trim_trailing_whitespace") or file_entry.get("trim_trailing_whitespace"))
+                normalized_target = normalize_boilerplate_text(
+                    target_text,
+                    ignore_line_patterns=ignore_patterns,
+                    trim_trailing_whitespace=trim_trailing,
+                )
+                normalized_source = normalize_boilerplate_text(
+                    source_text,
+                    ignore_line_patterns=ignore_patterns,
+                    trim_trailing_whitespace=trim_trailing,
+                )
+
+                if normalized_target == normalized_source:
+                    message = f"configured boilerplate `{name}` file `{target_path}` matches source `{source_path}`"
+                    result["current"].append(message)
+                    result["checks"].append({**check, "status": "current", "message": message})
+                    continue
+
+                message = (
+                    f"configured boilerplate `{name}` file `{target_path}` differs from "
+                    f"`{source_owner}/{source_repo}:{source_ref or 'default'}:{source_path}`; manual review required"
+                )
+                diff = render_file_diff(target_path, normalized_target, normalized_source)
+                result["updates"].append(message)
+                result["diffs"].append(diff)
+                result["checks"].append({**check, "status": "drift", "message": message, "diff": diff})
+
+        return result
+
     def get_github_tags(self, owner: str, repo: str) -> set[str]:
         cache_key = (owner, repo)
         if cache_key in self._github_tags_cache:
@@ -951,6 +1487,7 @@ class UpdateReportGenerator:
         from_version_constraint: Any,
         from_version: Any,
         prefix: str,
+        manifest_path: str = "service.yml",
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "updates": [],
@@ -2024,6 +2561,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     readme_path = Path(args.readme).resolve()
     repos = load_service_repos(readme_path, args.owner, args.repo_filter)
     generator = UpdateReportGenerator(args.owner)
+    boilerplate_config = load_boilerplate_config(args.boilerplate_config) if args.boilerplate_mode == "report" else {}
 
     results: list[RepoResult] = []
     missing_service_yml: list[str] = []
@@ -2048,6 +2586,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         planned_changes: list[dict[str, Any]] = []
         dry_run_changes: list[dict[str, Any]] = []
         updates_without_local_diff: list[str] = []
+        boilerplate_current: list[str] = []
+        boilerplate_updates: list[str] = []
+        boilerplate_warnings: list[str] = []
+        boilerplate_diffs: list[str] = []
+        boilerplate_checks: list[dict[str, Any]] = []
         repo_expects_image = False
         repo_expects_helm = False
         repo_expects_options = False
@@ -2082,6 +2625,16 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 continue
 
             repo_has_reportable_manifest = True
+            if args.boilerplate_mode == "report":
+                try:
+                    boilerplate_result = generator.check_build_boilerplates(repo, manifest_path, raw_service_data, prefix)
+                    boilerplate_current.extend(boilerplate_result["current"])
+                    boilerplate_updates.extend(boilerplate_result["updates"])
+                    boilerplate_warnings.extend(boilerplate_result["warnings"])
+                    boilerplate_checks.extend(boilerplate_result["checks"])
+                except Exception as exc:
+                    boilerplate_warnings.append(f"{prefix}build template evaluation failed: {exc}")
+
             parent_name = raw_service_data.get("from")
             from_version_constraint = raw_service_data.get("fromVersionConstraint")
             from_version = raw_service_data.get("fromVersion")
@@ -2121,7 +2674,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             if parent_name:
                 try:
                     parent_result = generator.check_parent_service_version(
-                        str(parent_name), from_version_constraint, from_version, prefix
+                        str(parent_name), from_version_constraint, from_version, prefix, manifest_path
                     )
                     updates.extend(parent_result["updates"])
                     current.extend(parent_result["current"])
@@ -2349,6 +2902,19 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             external_service_repos.append(repo)
             continue
 
+        if args.boilerplate_mode == "report" and boilerplate_config:
+            try:
+                configured_boilerplate_result = generator.evaluate_configured_boilerplates(
+                    repo, repo_service_types, boilerplate_config
+                )
+                boilerplate_current.extend(configured_boilerplate_result["current"])
+                boilerplate_updates.extend(configured_boilerplate_result["updates"])
+                boilerplate_warnings.extend(configured_boilerplate_result["warnings"])
+                boilerplate_diffs.extend(configured_boilerplate_result["diffs"])
+                boilerplate_checks.extend(configured_boilerplate_result["checks"])
+            except Exception as exc:
+                boilerplate_warnings.append(f"configured boilerplate evaluation failed: {exc}")
+
         if repo_expects_image and repo_missing_expected_image:
             no_image.append(repo)
         if repo_expects_helm and repo_missing_expected_helm:
@@ -2395,6 +2961,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 dry_run_changes=dry_run_changes,
                 dry_run_diffs=render_planned_diffs(dry_run_changes),
                 updates_without_local_diff=updates_without_local_diff,
+                boilerplate_current=boilerplate_current,
+                boilerplate_updates=boilerplate_updates,
+                boilerplate_warnings=boilerplate_warnings,
+                boilerplate_diffs=boilerplate_diffs,
+                boilerplate_checks=boilerplate_checks,
                 planned_release=planned_release,
             )
         )
@@ -2406,6 +2977,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         if not result.updates
         and not result.warnings
         and not result.notifications
+        and not result.boilerplate_updates
+        and not result.boilerplate_warnings
         and result.current
         and result.comparable
     ]
@@ -2447,6 +3020,9 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 for result in results
                 if result.planned_release and result.planned_release.get("status") == "blocked"
             ),
+            "boilerplate_updates": sum(1 for result in results if result.boilerplate_updates),
+            "boilerplate_warnings": sum(1 for result in results if result.boilerplate_warnings),
+            "boilerplate_drift": sum(1 for result in results if result.boilerplate_diffs),
         },
         "updates": {result.repo: result.updates for result in updates_section},
         "no_changes": {result.repo: result.current for result in no_changes_section},
@@ -2488,6 +3064,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
     lines.append(f"- Repos with manual-review dry-run diffs: {report['totals'].get('dry_run_updates', 0)}")
     lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
+    lines.append(f"- Repos with boilerplate/build-template review items: {report['totals'].get('boilerplate_updates', 0)}")
+    lines.append(f"- Repos with boilerplate/build-template warnings: {report['totals'].get('boilerplate_warnings', 0)}")
+    lines.append(f"- Repos with configured boilerplate file drift: {report['totals'].get('boilerplate_drift', 0)}")
     if "applied_updates" in report["totals"]:
         lines.append(f"- Repos updated by workflow: {report['totals'].get('applied_updates', 0)}")
     if "apply_failures" in report["totals"]:
@@ -2541,6 +3120,38 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines.extend(str(dry_run_diff).splitlines())
                 lines.append("```")
                 lines.append("")
+            lines.append("")
+
+    boilerplate_items = [
+        item
+        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+        if item.get("boilerplate_updates") or item.get("boilerplate_warnings") or item.get("boilerplate_diffs")
+    ]
+    if boilerplate_items:
+        lines.append("## Boilerplate and Build Template Review")
+        lines.append("")
+        lines.append("These checks are report only. The workflow does not apply boilerplate or build template changes.")
+        lines.append("")
+        for item in boilerplate_items:
+            lines.append(f"### {item['repo']}")
+            if item.get("boilerplate_updates"):
+                lines.append("Review items:")
+                for message in item["boilerplate_updates"]:
+                    lines.append(f"- {message}")
+                lines.append("")
+            if item.get("boilerplate_warnings"):
+                lines.append("Warnings:")
+                for message in item["boilerplate_warnings"]:
+                    lines.append(f"- {message}")
+                lines.append("")
+            if item.get("boilerplate_diffs"):
+                lines.append("Configured boilerplate diffs:")
+                lines.append("")
+                for boilerplate_diff in item["boilerplate_diffs"]:
+                    lines.append("```diff")
+                    lines.extend(str(boilerplate_diff).splitlines())
+                    lines.append("```")
+                    lines.append("")
             lines.append("")
 
     apply_result_items = [
@@ -2666,6 +3277,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             flags.append("no local helm configuration")
         if details.get("expects_options") and not details["has_options"]:
             flags.append("no local options")
+        if details.get("boilerplate_updates"):
+            flags.append("boilerplate/build-template review items")
+        if details.get("boilerplate_warnings"):
+            flags.append("boilerplate/build-template warnings")
         if flags:
             lines.append(f"- {repo}: {', '.join(flags)}")
         else:
@@ -2716,6 +3331,8 @@ def main() -> int:
         f"{report['totals'].get('planned_releases', 0)} repos have planned git tag releases, "
         f"{report['totals'].get('dry_run_updates', 0)} repos have manual-review dry-run diffs, "
         f"{report['totals'].get('release_blockers', 0)} repos have git tag release blockers, "
+        f"{report['totals'].get('boilerplate_updates', 0)} repos have boilerplate/build-template review items, "
+        f"{report['totals'].get('boilerplate_warnings', 0)} repos have boilerplate/build-template warnings, "
         f"{report['totals']['external_excluded']} external repos were excluded."
     )
     return 0
