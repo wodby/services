@@ -100,6 +100,12 @@ Before publishing a service for others to use, review:
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
 | Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
 
+### Observability apps
+
+| Service | Repository |
+| --- | --- |
+| Prometheus | [wodby/service-prometheus](https://github.com/wodby/service-prometheus) |
+
 ### Mail
 
 | Service | Repository |
@@ -111,7 +117,6 @@ Before publishing a service for others to use, review:
 
 | Service | Repository |
 | --- | --- |
-| Prometheus | [wodby/service-prometheus](https://github.com/wodby/service-prometheus) |
 | Monitoring | [wodby/service-monitoring](https://github.com/wodby/service-monitoring) |
 | Metrics Server | [wodby/service-metrics-server](https://github.com/wodby/service-metrics-server) |
 | Node Exporter | [wodby/service-node-exporter](https://github.com/wodby/service-node-exporter) |
