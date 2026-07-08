@@ -196,6 +196,16 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
         "current_field": "helm_app_version",
         "comparison": "major",
     },
+    "prometheus": {
+        "label": "Prometheus",
+        "source_label": "prometheus/prometheus GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "prometheus",
+        "repo": "prometheus",
+        "current_field": "wodby_chart_image_tag",
+        "comparison": "minor_family",
+    },
 }
 
 WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d+)*))?$")
