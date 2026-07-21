@@ -36,6 +36,37 @@ Before publishing a service for others to use, review:
 - [Service links](https://wodby.com/docs/2.0/services/links/)
 - [Naming rules](https://wodby.com/docs/2.0/naming/)
 
+## Image-derived config snapshots
+
+Managed services can expose editable default configuration in the Wodby UI by
+checking text snapshots into their `service-*` repositories. The service update
+workflow can verify those snapshots directly against files in the published
+container images.
+
+Synchronization is opt-in through [`config-sync.yml`](config-sync.yml). Each
+entry identifies a service manifest config and the workload/container whose
+image contains the source file. The config's `filepath` is the image source path
+and its `config` value is the repository-relative output file unless the
+inventory provides a `sourcePath` override.
+
+The workflow supports three modes:
+
+- `report` extracts and compares snapshots but does not apply them. Image
+  releases are blocked when a required snapshot would become stale.
+- `apply` includes snapshot changes in the same commit and patch tag as service
+  manifest updates.
+- `off` disables snapshot inspection.
+
+Extraction uses `docker create` and `docker cp`; it never starts the service
+container. Reports record the immutable image digest and content hash, and the
+apply step re-extracts by digest before writing a file. Unversioned configs are
+checked against every service option. If their contents differ, the workflow
+requires version-specific `configs[]` entries instead of choosing one image
+silently.
+
+The initial `service-nginx` entry intentionally runs in the workflow's default
+`report` mode while its version-specific snapshots are prepared.
+
 ## Managed services
 
 ### Application runtimes

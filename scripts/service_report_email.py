@@ -176,9 +176,9 @@ def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -
     if not selected:
         return
 
-    lines.append("Manifest Changes and Git Tags")
+    lines.append("Service Changes and Git Tags")
     lines.append("")
-    lines.append("The workflow applies these manifest changes and releases these git tags when the apply step succeeds.")
+    lines.append("The workflow applies these service changes and releases these git tags when the apply step succeeds.")
     lines.append("")
     for item, release, planned_diffs in selected:
         lines.append(f"{item['repo']}:")
@@ -190,7 +190,7 @@ def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -
         elif release.get("status") == "blocked":
             lines.append(f"- git tag release blocked: {release.get('reason') or 'release tag could not be calculated'}")
         if planned_diffs:
-            lines.append("manifest diff:")
+            lines.append("planned diff:")
             for planned_diff in planned_diffs:
                 lines.extend(str(planned_diff).rstrip().splitlines())
         lines.append("")
@@ -480,9 +480,9 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
 
     blocks = [
         "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
-        "Manifest Changes and Git Tags</h2>",
+        "Service Changes and Git Tags</h2>",
         "<p style=\"margin:0 0 12px 0;color:#4b5563;\">"
-        "The workflow applies these manifest changes and releases these git tags when the apply step succeeds.</p>",
+        "The workflow applies these service changes and releases these git tags when the apply step succeeds.</p>",
     ]
     for item, release, planned_diffs in selected:
         blocks.append(
@@ -512,7 +512,7 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
             )
         if planned_diffs:
             blocks.append(
-                "<h4 style=\"margin:14px 0 6px 0;font-size:14px;color:#111827;\">Manifest Diff</h4>"
+                "<h4 style=\"margin:14px 0 6px 0;font-size:14px;color:#111827;\">Planned Diff</h4>"
             )
             for planned_diff in planned_diffs:
                 blocks.append(html_diff(str(planned_diff)))

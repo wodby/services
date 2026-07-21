@@ -614,15 +614,21 @@ def render_planned_diffs(planned_changes: list[dict[str, Any]]) -> list[str]:
         for change in changes:
             key = str(change.get("key") or "value")
             path = str(change.get("path") or key)
-            lines.append(f"@@ {path} @@")
             diff_before_lines = change.get("diff_before_lines")
             diff_after_lines = change.get("diff_after_lines")
             if isinstance(diff_before_lines, list) or isinstance(diff_after_lines, list):
-                for line in diff_before_lines or []:
-                    lines.append(f"-{line}")
-                for line in diff_after_lines or []:
-                    lines.append(f"+{line}")
+                unified = list(
+                    difflib.unified_diff(
+                        diff_before_lines or [],
+                        diff_after_lines or [],
+                        fromfile=f"a/{manifest_path}",
+                        tofile=f"b/{manifest_path}",
+                        lineterm="",
+                    )
+                )
+                lines.extend(unified[2:])
             else:
+                lines.append(f"@@ {path} @@")
                 lines.append(f"-{key}: {format_diff_value(change.get('before'))}")
                 lines.append(f"+{key}: {format_diff_value(change.get('after'))}")
         diffs.append("\n".join(lines))
@@ -697,6 +703,20 @@ def human_change_description(change: dict[str, Any]) -> str:
     if change_type == "image_tag":
         version = str(change.get("image_version") or "unknown")
         return f"{prefix}Tag updated from `{before}` to `{after}` for version `{version}`."
+    if change_type == "config_snapshot":
+        config_name = str(change.get("config_name") or "config")
+        config_version = str(change.get("config_version") or "").strip()
+        version_suffix = f" for version `{config_version}`" if config_version else ""
+        output_file = str(change.get("file") or "config snapshot")
+        sources = change.get("sources") or []
+        source = sources[0] if sources and isinstance(sources[0], dict) else {}
+        image = str(source.get("image") or "image")
+        digest = str(source.get("image_digest") or "")
+        digest_suffix = f" (`{digest}`)" if digest else ""
+        return (
+            f"{prefix}Config `{config_name}`{version_suffix} refreshed in `{output_file}` "
+            f"from `{image}`{digest_suffix}."
+        )
     if change_type == "helm_chart":
         chart = str(change.get("helm_chart") or "chart")
         return f"{prefix}Helm chart `{chart}` updated from `{before}` to `{after}`."
@@ -3089,9 +3109,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         if item.get("planned_diffs") or (item.get("planned_release") or {}).get("status") == "planned"
     ]
     if planned_change_items:
-        lines.append("## Manifest Changes and Git Tags")
+        lines.append("## Service Changes and Git Tags")
         lines.append("")
-        lines.append("The workflow applies these manifest changes and releases these git tags when the apply step succeeds.")
+        lines.append("The workflow applies these service changes and releases these git tags when the apply step succeeds.")
         lines.append("")
         for item in planned_change_items:
             release = item.get("planned_release") or {}
@@ -3104,7 +3124,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines.extend(str(release.get("description") or "").splitlines())
                 lines.append("")
             if item.get("planned_diffs"):
-                lines.append("Manifest diff:")
+                lines.append("Planned diff:")
                 lines.append("")
                 for planned_diff in item["planned_diffs"]:
                     lines.append("```diff")

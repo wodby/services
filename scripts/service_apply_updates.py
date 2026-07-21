@@ -13,6 +13,7 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
+from service_config_sync import CONFIG_CHANGE_TYPE, apply_snapshot_changes
 from service_update_report import UpdateReportGenerator, latest_stable_semver_tag, render_markdown
 
 
@@ -212,6 +213,8 @@ def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]
     changed_files: list[str] = []
     changes_by_file: dict[str, list[dict[str, Any]]] = {}
     for change in planned_changes:
+        if change.get("change_type") == CONFIG_CHANGE_TYPE:
+            continue
         manifest_path = str(change.get("file") or "service.yml")
         changes_by_file.setdefault(manifest_path, []).append(change)
 
@@ -348,8 +351,15 @@ def commit_push_and_tag(
         raise RuntimeError(f"remote tag {tag} already exists; refusing to push a new commit without a release tag")
 
     if has_diff:
-        commit_message = f"Update service manifest for {tag}"
-        run_git(repo_dir, "commit", "-m", commit_message)
+        commit_message = f"Update service for {tag}"
+        run_git(
+            repo_dir,
+            "commit",
+            "-m",
+            commit_message,
+            "-m",
+            "Apply the planned manifest and image-derived config snapshot updates.",
+        )
         commit_sha = run_git(repo_dir, "rev-parse", "HEAD").stdout.strip()
         committed = True
     else:
@@ -394,10 +404,10 @@ def commit_push_and_tag(
 
     if committed:
         status = "applied"
-        message = f"Committed manifest changes and atomically pushed branch and tag {tag}."
+        message = f"Committed service changes and atomically pushed branch and tag {tag}."
     else:
         status = "tagged"
-        message = f"No manifest diff remained; pushed tag {tag} on the current HEAD."
+        message = f"No service diff remained; pushed tag {tag} on the current HEAD."
 
     return {
         "status": status,
@@ -419,7 +429,7 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
     release = item.get("planned_release") or {}
 
     if not planned_changes:
-        result = {"status": "skipped", "repo": args.repo, "message": "No planned manifest changes were found."}
+        result = {"status": "skipped", "repo": args.repo, "message": "No planned service changes were found."}
         item["apply_result"] = result
         return report, result
 
@@ -436,6 +446,8 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
     validate_planned_release(repo_dir, release)
     validate_planned_image_tags(args.owner, planned_changes)
     changed_files = apply_manifest_changes(repo_dir, planned_changes)
+    changed_files.extend(apply_snapshot_changes(repo_dir, planned_changes))
+    changed_files = list(dict.fromkeys(changed_files))
     result = commit_push_and_tag(repo_dir, args.repo, branch, release, changed_files)
     item["apply_result"] = result
     return report, result

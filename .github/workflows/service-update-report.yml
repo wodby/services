@@ -21,6 +21,15 @@ on:
         options:
           - report
           - off
+      config_sync_mode:
+        description: Inspect or apply image-derived service config snapshots
+        required: false
+        default: report
+        type: choice
+        options:
+          - report
+          - apply
+          - off
 
 permissions:
   contents: read
@@ -30,7 +39,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test-scripts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v5
+
+      - name: Set Up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: python -m pip install --upgrade pip packaging pyyaml requests ruamel.yaml
+
+      - name: Run Script Tests
+        run: python -m unittest discover -s tests
+
   discover-repos:
+    needs: test-scripts
     runs-on: ubuntu-latest
 
     outputs:
@@ -217,6 +245,17 @@ jobs:
             --boilerplate-config boilerplates.yml \
             --output-dir "$REPORT_DIR"
 
+      - name: Plan Image-Derived Config Snapshots
+        env:
+          CONFIG_SYNC_MODE: ${{ inputs.config_sync_mode || 'report' }}
+        run: |
+          python scripts/service_config_sync.py \
+            --report-dir "$REPORT_DIR" \
+            --repo "$SERVICE_REPO" \
+            --owner wodby \
+            --inventory config-sync.yml \
+            --mode "$CONFIG_SYNC_MODE"
+
       - name: Determine Apply Scope
         id: apply-scope
         run: |
@@ -323,7 +362,7 @@ jobs:
 
           release = (details or {}).get("planned_release") or {}
           if release.get("status") == "planned" or (details and details.get("planned_diffs")):
-              print("### Manifest Change and Git Tag")
+              print("### Service Change and Git Tag")
               if release.get("status") == "planned":
                   print(f"- Git tag: `{release['tag']}`")
                   print(f"- Previous tag: `{release['previous_tag']}`")
@@ -335,7 +374,7 @@ jobs:
                   print(f"- Git tag release blocked: {release.get('reason') or 'release tag could not be calculated'}")
                   print("")
               if details and details.get("planned_diffs"):
-                  print("#### Manifest Diff")
+                  print("#### Planned Diff")
                   for planned_diff in details["planned_diffs"]:
                       print("```diff")
                       print(str(planned_diff).rstrip())
@@ -530,6 +569,17 @@ jobs:
             --boilerplate-config boilerplates.yml \
             --output-dir "$REPORT_DIR"
 
+      - name: Plan Image-Derived Config Snapshots
+        env:
+          CONFIG_SYNC_MODE: ${{ inputs.config_sync_mode || 'report' }}
+        run: |
+          python scripts/service_config_sync.py \
+            --report-dir "$REPORT_DIR" \
+            --repo "$SERVICE_REPO" \
+            --owner wodby \
+            --inventory config-sync.yml \
+            --mode "$CONFIG_SYNC_MODE"
+
       - name: Determine Apply Scope
         id: apply-scope
         run: |
@@ -636,7 +686,7 @@ jobs:
 
           release = (details or {}).get("planned_release") or {}
           if release.get("status") == "planned" or (details and details.get("planned_diffs")):
-              print("### Manifest Change and Git Tag")
+              print("### Service Change and Git Tag")
               if release.get("status") == "planned":
                   print(f"- Git tag: `{release['tag']}`")
                   print(f"- Previous tag: `{release['previous_tag']}`")
@@ -648,7 +698,7 @@ jobs:
                   print(f"- Git tag release blocked: {release.get('reason') or 'release tag could not be calculated'}")
                   print("")
               if details and details.get("planned_diffs"):
-                  print("#### Manifest Diff")
+                  print("#### Planned Diff")
                   for planned_diff in details["planned_diffs"]:
                       print("```diff")
                       print(str(planned_diff).rstrip())

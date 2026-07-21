@@ -1,0 +1,11 @@
+services:
+  service-nginx:
+    manifests:
+      service.yml:
+        configs:
+        - name: main
+          workload: main
+          container: nginx
+        - name: vhost
+          workload: main
+          container: nginx
