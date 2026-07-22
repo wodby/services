@@ -222,7 +222,6 @@ GITHUB_REPO_URL_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
 MAJOR_CONSTRAINT_RE = re.compile(r"^\^v?(?P<major>\d+)(?:\.x)?$")
-BOILERPLATE_DIFF_MAX_LINES = 160
 
 NOTIFICATION_GROUP_ORDER = [
     "major_version",
@@ -272,15 +271,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--owner", default="wodby", help="GitHub owner/org that owns the service repos.")
     parser.add_argument("--repo-filter", default="", help="Optional regex filter for repo names.")
     parser.add_argument(
-        "--boilerplate-mode",
+        "--build-template-mode",
         choices=("off", "report"),
         default="report",
-        help="Whether build template and configured boilerplate checks are included in the report.",
-    )
-    parser.add_argument(
-        "--boilerplate-config",
-        default="boilerplates.yml",
-        help="Optional YAML file with source-to-target boilerplate file comparisons.",
+        help="Whether service build template references are checked and included in the report.",
     )
     parser.add_argument(
         "--output-dir",
@@ -395,78 +389,6 @@ def manifest_relative_path(manifest_path: str, value: Any) -> str:
         return path
     manifest_dir = manifest_path.rsplit("/", 1)[0]
     return f"{manifest_dir}/{path}"
-
-
-def normalize_boilerplate_text(
-    value: str,
-    *,
-    ignore_line_patterns: list[str] | None = None,
-    trim_trailing_whitespace: bool = False,
-) -> str:
-    text = value.replace("\r\n", "\n").replace("\r", "\n")
-    lines = text.split("\n")
-    if lines and lines[-1] == "":
-        lines = lines[:-1]
-
-    patterns = [re.compile(pattern) for pattern in ignore_line_patterns or []]
-    normalized_lines = []
-    for line in lines:
-        if any(pattern.search(line) for pattern in patterns):
-            continue
-        normalized_lines.append(line.rstrip() if trim_trailing_whitespace else line)
-    return "\n".join(normalized_lines) + "\n"
-
-
-def render_file_diff(target_path: str, current_text: str, expected_text: str, max_lines: int = BOILERPLATE_DIFF_MAX_LINES) -> str:
-    diff_lines = [
-        f"diff --git a/{target_path} b/{target_path}",
-        *difflib.unified_diff(
-            current_text.splitlines(),
-            expected_text.splitlines(),
-            fromfile=f"a/{target_path}",
-            tofile=f"b/{target_path}",
-            lineterm="",
-        ),
-    ]
-    if len(diff_lines) > max_lines:
-        diff_lines = diff_lines[:max_lines]
-        diff_lines.append(f"... diff truncated after {max_lines} lines")
-    return "\n".join(diff_lines)
-
-
-def load_boilerplate_config(path: str | None) -> dict[str, Any]:
-    if not path:
-        return {}
-    config_path = Path(path)
-    if not config_path.is_file():
-        return {}
-    data = yaml.safe_load(config_path.read_text()) or {}
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{config_path} did not decode to a mapping")
-    return data
-
-
-def boilerplate_template_entries(config: dict[str, Any]) -> list[dict[str, Any]]:
-    entries = config.get("file_templates") or config.get("templates") or []
-    return [entry for entry in entries if isinstance(entry, dict) and entry.get("enabled", True)]
-
-
-def boilerplate_entry_applies(entry: dict[str, Any], repo: str, service_types: set[str]) -> bool:
-    applies_to = entry.get("applies_to") if isinstance(entry.get("applies_to"), dict) else {}
-    repos = {str(item) for item in applies_to.get("repos") or entry.get("repos") or []}
-    excluded_repos = {str(item) for item in applies_to.get("exclude_repos") or entry.get("exclude_repos") or []}
-    patterns = [str(item) for item in applies_to.get("repo_patterns") or entry.get("repo_patterns") or []]
-    service_type_filters = {str(item) for item in applies_to.get("service_types") or entry.get("service_types") or []}
-
-    if repo in excluded_repos:
-        return False
-    if repos and repo not in repos:
-        return False
-    if patterns and not any(re.search(pattern, repo) for pattern in patterns):
-        return False
-    if service_type_filters and not (service_types & service_type_filters):
-        return False
-    return True
 
 
 def version_family_label(version: Version, depth: int = 2) -> str:
@@ -925,11 +847,10 @@ class RepoResult:
     dry_run_changes: list[dict[str, Any]]
     dry_run_diffs: list[str]
     updates_without_local_diff: list[str]
-    boilerplate_current: list[str]
-    boilerplate_updates: list[str]
-    boilerplate_warnings: list[str]
-    boilerplate_diffs: list[str]
-    boilerplate_checks: list[dict[str, Any]]
+    build_template_current: list[str]
+    build_template_review_items: list[str]
+    build_template_warnings: list[str]
+    build_template_checks: list[dict[str, Any]]
     planned_release: dict[str, Any] | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -956,11 +877,10 @@ class RepoResult:
             "dry_run_changes": self.dry_run_changes,
             "dry_run_diffs": self.dry_run_diffs,
             "updates_without_local_diff": self.updates_without_local_diff,
-            "boilerplate_current": self.boilerplate_current,
-            "boilerplate_updates": self.boilerplate_updates,
-            "boilerplate_warnings": self.boilerplate_warnings,
-            "boilerplate_diffs": self.boilerplate_diffs,
-            "boilerplate_checks": self.boilerplate_checks,
+            "build_template_current": self.build_template_current,
+            "build_template_review_items": self.build_template_review_items,
+            "build_template_warnings": self.build_template_warnings,
+            "build_template_checks": self.build_template_checks,
             "planned_release": self.planned_release,
         }
 
@@ -1294,7 +1214,7 @@ class UpdateReportGenerator:
 
         return {**check, "status": status, "messages": messages, "message": messages[-1] if messages else ""}
 
-    def check_build_boilerplates(
+    def check_build_templates(
         self,
         repo: str,
         manifest_path: str,
@@ -1370,113 +1290,6 @@ class UpdateReportGenerator:
                 result["warnings"].extend(warning_messages)
             else:
                 result["warnings"].extend(messages)
-
-        return result
-
-    def evaluate_configured_boilerplates(
-        self,
-        repo: str,
-        service_types: set[str],
-        config: dict[str, Any],
-    ) -> dict[str, Any]:
-        result: dict[str, Any] = {
-            "current": [],
-            "updates": [],
-            "warnings": [],
-            "diffs": [],
-            "checks": [],
-        }
-        for entry in boilerplate_template_entries(config):
-            if not boilerplate_entry_applies(entry, repo, service_types):
-                continue
-
-            name = str(entry.get("name") or "boilerplate").strip() or "boilerplate"
-            source = entry.get("source") if isinstance(entry.get("source"), dict) else {}
-            source_owner = str(source.get("owner") or self.owner)
-            source_repo = str(source.get("repo") or "").strip()
-            source_ref = str(source.get("ref") or "").strip() or None
-            if not source_repo:
-                message = f"configured boilerplate `{name}` has no source repo"
-                result["warnings"].append(message)
-                result["checks"].append({"kind": "file_template", "template": name, "status": "warning", "message": message})
-                continue
-
-            files = entry.get("files") or []
-            if not isinstance(files, list):
-                message = f"configured boilerplate `{name}` has non-list `files`"
-                result["warnings"].append(message)
-                result["checks"].append({"kind": "file_template", "template": name, "status": "warning", "message": message})
-                continue
-
-            for file_entry in files:
-                if not isinstance(file_entry, dict):
-                    message = f"configured boilerplate `{name}` contains a non-mapping file entry"
-                    result["warnings"].append(message)
-                    result["checks"].append({"kind": "file_template", "template": name, "status": "warning", "message": message})
-                    continue
-                source_path = str(file_entry.get("source") or file_entry.get("path") or "").strip()
-                target_path = str(file_entry.get("target") or file_entry.get("path") or source_path).strip()
-                required = bool(file_entry.get("required"))
-                check = {
-                    "kind": "file_template",
-                    "template": name,
-                    "source": f"{source_owner}/{source_repo}:{source_ref or 'default'}:{source_path}",
-                    "file": target_path,
-                }
-
-                if not source_path or not target_path:
-                    message = f"configured boilerplate `{name}` has an empty source or target path"
-                    result["warnings"].append(message)
-                    result["checks"].append({**check, "status": "warning", "message": message})
-                    continue
-
-                target_text = self.get_repo_file(repo, target_path)
-                if target_text is None:
-                    if required:
-                        message = f"configured boilerplate `{name}` requires missing file `{target_path}`"
-                        result["warnings"].append(message)
-                        result["checks"].append({**check, "status": "missing", "message": message})
-                    continue
-
-                source_text = self.get_github_file(source_owner, source_repo, source_path, source_ref)
-                if source_text is None:
-                    message = (
-                        f"configured boilerplate `{name}` source file `{source_path}` was not found "
-                        f"in `{source_owner}/{source_repo}`"
-                    )
-                    result["warnings"].append(message)
-                    result["checks"].append({**check, "status": "warning", "message": message})
-                    continue
-
-                ignore_patterns = list(entry.get("ignore_line_patterns") or []) + list(
-                    file_entry.get("ignore_line_patterns") or []
-                )
-                trim_trailing = bool(entry.get("trim_trailing_whitespace") or file_entry.get("trim_trailing_whitespace"))
-                normalized_target = normalize_boilerplate_text(
-                    target_text,
-                    ignore_line_patterns=ignore_patterns,
-                    trim_trailing_whitespace=trim_trailing,
-                )
-                normalized_source = normalize_boilerplate_text(
-                    source_text,
-                    ignore_line_patterns=ignore_patterns,
-                    trim_trailing_whitespace=trim_trailing,
-                )
-
-                if normalized_target == normalized_source:
-                    message = f"configured boilerplate `{name}` file `{target_path}` matches source `{source_path}`"
-                    result["current"].append(message)
-                    result["checks"].append({**check, "status": "current", "message": message})
-                    continue
-
-                message = (
-                    f"configured boilerplate `{name}` file `{target_path}` differs from "
-                    f"`{source_owner}/{source_repo}:{source_ref or 'default'}:{source_path}`; manual review required"
-                )
-                diff = render_file_diff(target_path, normalized_target, normalized_source)
-                result["updates"].append(message)
-                result["diffs"].append(diff)
-                result["checks"].append({**check, "status": "drift", "message": message, "diff": diff})
 
         return result
 
@@ -2591,7 +2404,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     readme_path = Path(args.readme).resolve()
     repos = load_service_repos(readme_path, args.owner, args.repo_filter)
     generator = UpdateReportGenerator(args.owner)
-    boilerplate_config = load_boilerplate_config(args.boilerplate_config) if args.boilerplate_mode == "report" else {}
 
     results: list[RepoResult] = []
     missing_service_yml: list[str] = []
@@ -2616,11 +2428,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         planned_changes: list[dict[str, Any]] = []
         dry_run_changes: list[dict[str, Any]] = []
         updates_without_local_diff: list[str] = []
-        boilerplate_current: list[str] = []
-        boilerplate_updates: list[str] = []
-        boilerplate_warnings: list[str] = []
-        boilerplate_diffs: list[str] = []
-        boilerplate_checks: list[dict[str, Any]] = []
+        build_template_current: list[str] = []
+        build_template_review_items: list[str] = []
+        build_template_warnings: list[str] = []
+        build_template_checks: list[dict[str, Any]] = []
         repo_expects_image = False
         repo_expects_helm = False
         repo_expects_options = False
@@ -2655,15 +2466,15 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 continue
 
             repo_has_reportable_manifest = True
-            if args.boilerplate_mode == "report":
+            if args.build_template_mode == "report":
                 try:
-                    boilerplate_result = generator.check_build_boilerplates(repo, manifest_path, raw_service_data, prefix)
-                    boilerplate_current.extend(boilerplate_result["current"])
-                    boilerplate_updates.extend(boilerplate_result["updates"])
-                    boilerplate_warnings.extend(boilerplate_result["warnings"])
-                    boilerplate_checks.extend(boilerplate_result["checks"])
+                    build_template_result = generator.check_build_templates(repo, manifest_path, raw_service_data, prefix)
+                    build_template_current.extend(build_template_result["current"])
+                    build_template_review_items.extend(build_template_result["updates"])
+                    build_template_warnings.extend(build_template_result["warnings"])
+                    build_template_checks.extend(build_template_result["checks"])
                 except Exception as exc:
-                    boilerplate_warnings.append(f"{prefix}build template evaluation failed: {exc}")
+                    build_template_warnings.append(f"{prefix}build template evaluation failed: {exc}")
 
             parent_name = raw_service_data.get("from")
             from_version_constraint = raw_service_data.get("fromVersionConstraint")
@@ -2932,19 +2743,6 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             external_service_repos.append(repo)
             continue
 
-        if args.boilerplate_mode == "report" and boilerplate_config:
-            try:
-                configured_boilerplate_result = generator.evaluate_configured_boilerplates(
-                    repo, repo_service_types, boilerplate_config
-                )
-                boilerplate_current.extend(configured_boilerplate_result["current"])
-                boilerplate_updates.extend(configured_boilerplate_result["updates"])
-                boilerplate_warnings.extend(configured_boilerplate_result["warnings"])
-                boilerplate_diffs.extend(configured_boilerplate_result["diffs"])
-                boilerplate_checks.extend(configured_boilerplate_result["checks"])
-            except Exception as exc:
-                boilerplate_warnings.append(f"configured boilerplate evaluation failed: {exc}")
-
         if repo_expects_image and repo_missing_expected_image:
             no_image.append(repo)
         if repo_expects_helm and repo_missing_expected_helm:
@@ -2991,11 +2789,10 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 dry_run_changes=dry_run_changes,
                 dry_run_diffs=render_planned_diffs(dry_run_changes),
                 updates_without_local_diff=updates_without_local_diff,
-                boilerplate_current=boilerplate_current,
-                boilerplate_updates=boilerplate_updates,
-                boilerplate_warnings=boilerplate_warnings,
-                boilerplate_diffs=boilerplate_diffs,
-                boilerplate_checks=boilerplate_checks,
+                build_template_current=build_template_current,
+                build_template_review_items=build_template_review_items,
+                build_template_warnings=build_template_warnings,
+                build_template_checks=build_template_checks,
                 planned_release=planned_release,
             )
         )
@@ -3007,8 +2804,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         if not result.updates
         and not result.warnings
         and not result.notifications
-        and not result.boilerplate_updates
-        and not result.boilerplate_warnings
+        and not result.build_template_review_items
+        and not result.build_template_warnings
         and result.current
         and result.comparable
     ]
@@ -3050,9 +2847,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 for result in results
                 if result.planned_release and result.planned_release.get("status") == "blocked"
             ),
-            "boilerplate_updates": sum(1 for result in results if result.boilerplate_updates),
-            "boilerplate_warnings": sum(1 for result in results if result.boilerplate_warnings),
-            "boilerplate_drift": sum(1 for result in results if result.boilerplate_diffs),
+            "build_template_review_items": sum(1 for result in results if result.build_template_review_items),
+            "build_template_warnings": sum(1 for result in results if result.build_template_warnings),
         },
         "updates": {result.repo: result.updates for result in updates_section},
         "no_changes": {result.repo: result.current for result in no_changes_section},
@@ -3094,9 +2890,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- Repos with planned git tag releases: {report['totals'].get('planned_releases', 0)}")
     lines.append(f"- Repos with manual-review dry-run diffs: {report['totals'].get('dry_run_updates', 0)}")
     lines.append(f"- Repos with git tag release blockers: {report['totals'].get('release_blockers', 0)}")
-    lines.append(f"- Repos with boilerplate/build-template review items: {report['totals'].get('boilerplate_updates', 0)}")
-    lines.append(f"- Repos with boilerplate/build-template warnings: {report['totals'].get('boilerplate_warnings', 0)}")
-    lines.append(f"- Repos with configured boilerplate file drift: {report['totals'].get('boilerplate_drift', 0)}")
+    lines.append(f"- Repos with build-template review items: {report['totals'].get('build_template_review_items', 0)}")
+    lines.append(f"- Repos with build-template warnings: {report['totals'].get('build_template_warnings', 0)}")
     if "applied_updates" in report["totals"]:
         lines.append(f"- Repos updated by workflow: {report['totals'].get('applied_updates', 0)}")
     if "apply_failures" in report["totals"]:
@@ -3152,36 +2947,28 @@ def render_markdown(report: dict[str, Any]) -> str:
                 lines.append("")
             lines.append("")
 
-    boilerplate_items = [
+    build_template_items = [
         item
         for item in sorted(report["per_repo"], key=lambda value: value["repo"])
-        if item.get("boilerplate_updates") or item.get("boilerplate_warnings") or item.get("boilerplate_diffs")
+        if item.get("build_template_review_items") or item.get("build_template_warnings")
     ]
-    if boilerplate_items:
-        lines.append("## Boilerplate and Build Template Review")
+    if build_template_items:
+        lines.append("## Build Template Review")
         lines.append("")
-        lines.append("These checks are report only. The workflow does not apply boilerplate or build template changes.")
+        lines.append("These checks are report only. The workflow does not apply build template changes.")
         lines.append("")
-        for item in boilerplate_items:
+        for item in build_template_items:
             lines.append(f"### {item['repo']}")
-            if item.get("boilerplate_updates"):
+            if item.get("build_template_review_items"):
                 lines.append("Review items:")
-                for message in item["boilerplate_updates"]:
+                for message in item["build_template_review_items"]:
                     lines.append(f"- {message}")
                 lines.append("")
-            if item.get("boilerplate_warnings"):
+            if item.get("build_template_warnings"):
                 lines.append("Warnings:")
-                for message in item["boilerplate_warnings"]:
+                for message in item["build_template_warnings"]:
                     lines.append(f"- {message}")
                 lines.append("")
-            if item.get("boilerplate_diffs"):
-                lines.append("Configured boilerplate diffs:")
-                lines.append("")
-                for boilerplate_diff in item["boilerplate_diffs"]:
-                    lines.append("```diff")
-                    lines.extend(str(boilerplate_diff).splitlines())
-                    lines.append("```")
-                    lines.append("")
             lines.append("")
 
     apply_result_items = [
@@ -3307,10 +3094,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             flags.append("no local helm configuration")
         if details.get("expects_options") and not details["has_options"]:
             flags.append("no local options")
-        if details.get("boilerplate_updates"):
-            flags.append("boilerplate/build-template review items")
-        if details.get("boilerplate_warnings"):
-            flags.append("boilerplate/build-template warnings")
+        if details.get("build_template_review_items"):
+            flags.append("build-template review items")
+        if details.get("build_template_warnings"):
+            flags.append("build-template warnings")
         if flags:
             lines.append(f"- {repo}: {', '.join(flags)}")
         else:
@@ -3361,8 +3148,8 @@ def main() -> int:
         f"{report['totals'].get('planned_releases', 0)} repos have planned git tag releases, "
         f"{report['totals'].get('dry_run_updates', 0)} repos have manual-review dry-run diffs, "
         f"{report['totals'].get('release_blockers', 0)} repos have git tag release blockers, "
-        f"{report['totals'].get('boilerplate_updates', 0)} repos have boilerplate/build-template review items, "
-        f"{report['totals'].get('boilerplate_warnings', 0)} repos have boilerplate/build-template warnings, "
+        f"{report['totals'].get('build_template_review_items', 0)} repos have build-template review items, "
+        f"{report['totals'].get('build_template_warnings', 0)} repos have build-template warnings, "
         f"{report['totals']['external_excluded']} external repos were excluded."
     )
     return 0

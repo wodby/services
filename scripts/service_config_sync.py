@@ -527,8 +527,8 @@ def refresh_report_totals(report: dict[str, Any]) -> None:
         if not item.get("updates")
         and not item.get("warnings")
         and not item.get("notifications")
-        and not item.get("boilerplate_updates")
-        and not item.get("boilerplate_warnings")
+        and not item.get("build_template_review_items")
+        and not item.get("build_template_warnings")
         and item.get("current")
         and item.get("comparable", True)
     ]

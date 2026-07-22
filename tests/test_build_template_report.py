@@ -31,13 +31,13 @@ class FakeGenerator(UpdateReportGenerator):
         return self.tags.get((owner, repo), set())
 
 
-class BoilerplateReportTest(unittest.TestCase):
+class BuildTemplateReportTest(unittest.TestCase):
     def test_build_template_branch_and_dockerfile_are_current(self) -> None:
         generator = FakeGenerator()
         generator.repo_files[("service-node", "Dockerfile")] = "FROM node\n"
         generator.refs.add(("wodby", "expressjs-boilerplate", "heads/main"))
 
-        result = generator.check_build_boilerplates(
+        result = generator.check_build_templates(
             "service-node",
             "service.yml",
             {
@@ -67,7 +67,7 @@ class BoilerplateReportTest(unittest.TestCase):
         generator = FakeGenerator()
         generator.tags[("laravel", "laravel")] = {"v11.0.0", "v11.6.1", "v13.8.0"}
 
-        result = generator.check_build_boilerplates(
+        result = generator.check_build_templates(
             "service-laravel-php",
             "service.yml",
             {
@@ -98,41 +98,17 @@ class BoilerplateReportTest(unittest.TestCase):
         )
         self.assertIn("build template `boilerplate` tag constraint `^11` resolves to `v11.6.1`", result["current"])
 
-    def test_configured_boilerplate_file_drift_produces_diff(self) -> None:
-        generator = FakeGenerator()
-        generator.repo_files[("service-demo", ".dockerignore")] = "node_modules\n"
-        generator.github_files[("wodby", "service", ".dockerignore", "main")] = ".git\nnode_modules\n"
-
-        result = generator.evaluate_configured_boilerplates(
-            "service-demo",
-            {"service"},
-            {
-                "file_templates": [
-                    {
-                        "name": "service-dockerignore",
-                        "source": {"owner": "wodby", "repo": "service", "ref": "main"},
-                        "files": [{"path": ".dockerignore"}],
-                    }
-                ]
-            },
-        )
-
-        self.assertEqual(result["warnings"], [])
-        self.assertEqual(len(result["updates"]), 1)
-        self.assertEqual(len(result["diffs"]), 1)
-        self.assertIn("+.git", result["diffs"][0])
-
-    def test_markdown_includes_boilerplate_review_section(self) -> None:
-        report = sample_boilerplate_report()
+    def test_markdown_includes_build_template_review_section(self) -> None:
+        report = sample_build_template_report()
 
         markdown = render_markdown(report)
 
-        self.assertIn("## Boilerplate and Build Template Review", markdown)
-        self.assertIn("configured boilerplate drift", markdown)
-        self.assertIn("configured boilerplate file drift: 1", markdown)
+        self.assertIn("## Build Template Review", markdown)
+        self.assertIn("new build template tag", markdown)
+        self.assertNotIn("boilerplate file drift", markdown)
 
-    def test_email_body_includes_boilerplate_review_section(self) -> None:
-        reports = [sample_boilerplate_report()]
+    def test_email_body_includes_build_template_review_section(self) -> None:
+        reports = [sample_build_template_report()]
         items = repo_items(reports)
         counts = event_counts(reports, items, "success", "success")
 
@@ -147,13 +123,12 @@ class BoilerplateReportTest(unittest.TestCase):
             artifact_result="success",
         )
 
-        self.assertEqual(counts["boilerplate_updates"], 1)
-        self.assertEqual(counts["boilerplate_drift"], 1)
-        self.assertIn("Boilerplate and Build Template Review", body)
-        self.assertIn("configured boilerplate drift", body)
+        self.assertEqual(counts["build_template_review_items"], 1)
+        self.assertIn("Build Template Review", body)
+        self.assertIn("new build template tag", body)
 
 
-def sample_boilerplate_report() -> dict:
+def sample_build_template_report() -> dict:
     return {
         "generated_at": "2026-07-07T00:00:00+00:00",
         "totals": {
@@ -171,9 +146,8 @@ def sample_boilerplate_report() -> dict:
             "planned_releases": 0,
             "dry_run_updates": 0,
             "release_blockers": 0,
-            "boilerplate_updates": 1,
-            "boilerplate_warnings": 0,
-            "boilerplate_drift": 1,
+            "build_template_review_items": 1,
+            "build_template_warnings": 0,
         },
         "per_repo": [
             {
@@ -193,9 +167,8 @@ def sample_boilerplate_report() -> dict:
                 "has_image": True,
                 "has_helm": True,
                 "has_options": True,
-                "boilerplate_updates": ["configured boilerplate drift"],
-                "boilerplate_warnings": [],
-                "boilerplate_diffs": ["diff --git a/.dockerignore b/.dockerignore"],
+                "build_template_review_items": ["new build template tag `v2.0.0` is available"],
+                "build_template_warnings": [],
             }
         ],
         "no_changes": {},
@@ -208,8 +181,8 @@ def sample_boilerplate_report() -> dict:
                 "has_image": True,
                 "has_helm": True,
                 "has_options": True,
-                "boilerplate_updates": ["configured boilerplate drift"],
-                "boilerplate_warnings": [],
+                "build_template_review_items": ["new build template tag `v2.0.0` is available"],
+                "build_template_warnings": [],
                 "current": [],
                 "warnings": [],
             }

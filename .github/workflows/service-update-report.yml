@@ -13,8 +13,8 @@ on:
         required: false
         default: ""
         type: string
-      boilerplate_mode:
-        description: Include report-only boilerplate/build-template checks
+      build_template_mode:
+        description: Include report-only build-template checks
         required: false
         default: report
         type: choice
@@ -241,8 +241,7 @@ jobs:
             --readme README.md \
             --owner wodby \
             --repo-filter "^${SERVICE_REPO}$" \
-            --boilerplate-mode "${{ inputs.boilerplate_mode || 'report' }}" \
-            --boilerplate-config boilerplates.yml \
+            --build-template-mode "${{ inputs.build_template_mode || 'report' }}" \
             --output-dir "$REPORT_DIR"
 
       - name: Plan Image-Derived Config Snapshots
@@ -342,10 +341,10 @@ jobs:
               print("- Status: update candidate")
           elif details and details.get("dry_run_diffs"):
               print("- Status: manual review dry-run candidate")
-          elif details and (details.get("boilerplate_updates") or details.get("boilerplate_diffs")):
-              print("- Status: boilerplate/build-template review candidate")
-          elif details and details.get("boilerplate_warnings"):
-              print("- Status: boilerplate/build-template warning")
+          elif details and details.get("build_template_review_items"):
+              print("- Status: build-template review candidate")
+          elif details and details.get("build_template_warnings"):
+              print("- Status: build-template warning")
           elif details and details.get("notifications"):
               print("- Status: manual review notification")
           elif details and (
@@ -393,31 +392,22 @@ jobs:
                   print("")
 
           if details and (
-              details.get("boilerplate_updates")
-              or details.get("boilerplate_warnings")
-              or details.get("boilerplate_diffs")
+              details.get("build_template_review_items")
+              or details.get("build_template_warnings")
           ):
-              print("### Boilerplate and Build Template Review")
-              print("These checks are report only. The workflow does not apply boilerplate or build template changes.")
+              print("### Build Template Review")
+              print("These checks are report only. The workflow does not apply build template changes.")
               print("")
-              if details.get("boilerplate_updates"):
+              if details.get("build_template_review_items"):
                   print("#### Review Items")
-                  for message in details["boilerplate_updates"]:
+                  for message in details["build_template_review_items"]:
                       print(f"- {message}")
                   print("")
-              if details.get("boilerplate_warnings"):
+              if details.get("build_template_warnings"):
                   print("#### Warnings")
-                  for message in details["boilerplate_warnings"]:
+                  for message in details["build_template_warnings"]:
                       print(f"- {message}")
                   print("")
-              if details.get("boilerplate_diffs"):
-                  print("#### Configured Boilerplate Diffs")
-                  for boilerplate_diff in details["boilerplate_diffs"]:
-                      print("```diff")
-                      print(str(boilerplate_diff).rstrip())
-                      print("```")
-                      print("")
-
           apply_result = (details or {}).get("apply_result") or {}
           if apply_result:
               print("### Apply Result")
@@ -492,8 +482,8 @@ jobs:
               and details.get("comparable")
               and not report["updates"]
               and not details["warnings"]
-              and not details.get("boilerplate_updates")
-              and not details.get("boilerplate_warnings")
+              and not details.get("build_template_review_items")
+              and not details.get("build_template_warnings")
               and repo not in report["missing_service_yml"]
           ):
               print("No update candidates were found.")
@@ -565,8 +555,7 @@ jobs:
             --readme README.md \
             --owner wodby \
             --repo-filter "^${SERVICE_REPO}$" \
-            --boilerplate-mode "${{ inputs.boilerplate_mode || 'report' }}" \
-            --boilerplate-config boilerplates.yml \
+            --build-template-mode "${{ inputs.build_template_mode || 'report' }}" \
             --output-dir "$REPORT_DIR"
 
       - name: Plan Image-Derived Config Snapshots
@@ -666,10 +655,10 @@ jobs:
               print("- Status: update candidate")
           elif details and details.get("dry_run_diffs"):
               print("- Status: manual review dry-run candidate")
-          elif details and (details.get("boilerplate_updates") or details.get("boilerplate_diffs")):
-              print("- Status: boilerplate/build-template review candidate")
-          elif details and details.get("boilerplate_warnings"):
-              print("- Status: boilerplate/build-template warning")
+          elif details and details.get("build_template_review_items"):
+              print("- Status: build-template review candidate")
+          elif details and details.get("build_template_warnings"):
+              print("- Status: build-template warning")
           elif details and details.get("notifications"):
               print("- Status: manual review notification")
           elif details and (
@@ -717,31 +706,22 @@ jobs:
                   print("")
 
           if details and (
-              details.get("boilerplate_updates")
-              or details.get("boilerplate_warnings")
-              or details.get("boilerplate_diffs")
+              details.get("build_template_review_items")
+              or details.get("build_template_warnings")
           ):
-              print("### Boilerplate and Build Template Review")
-              print("These checks are report only. The workflow does not apply boilerplate or build template changes.")
+              print("### Build Template Review")
+              print("These checks are report only. The workflow does not apply build template changes.")
               print("")
-              if details.get("boilerplate_updates"):
+              if details.get("build_template_review_items"):
                   print("#### Review Items")
-                  for message in details["boilerplate_updates"]:
+                  for message in details["build_template_review_items"]:
                       print(f"- {message}")
                   print("")
-              if details.get("boilerplate_warnings"):
+              if details.get("build_template_warnings"):
                   print("#### Warnings")
-                  for message in details["boilerplate_warnings"]:
+                  for message in details["build_template_warnings"]:
                       print(f"- {message}")
                   print("")
-              if details.get("boilerplate_diffs"):
-                  print("#### Configured Boilerplate Diffs")
-                  for boilerplate_diff in details["boilerplate_diffs"]:
-                      print("```diff")
-                      print(str(boilerplate_diff).rstrip())
-                      print("```")
-                      print("")
-
           apply_result = (details or {}).get("apply_result") or {}
           if apply_result:
               print("### Apply Result")
@@ -816,8 +796,8 @@ jobs:
               and details.get("comparable")
               and not report["updates"]
               and not details["warnings"]
-              and not details.get("boilerplate_updates")
-              and not details.get("boilerplate_warnings")
+              and not details.get("build_template_review_items")
+              and not details.get("build_template_warnings")
               and repo not in report["missing_service_yml"]
           ):
               print("No update candidates were found.")

@@ -130,9 +130,8 @@ def sample_report(planned_changes: list[dict] | None = None) -> dict:
             "planned_releases": 1 if changes else 0,
             "dry_run_updates": 0,
             "release_blockers": 0,
-            "boilerplate_updates": 0,
-            "boilerplate_warnings": 0,
-            "boilerplate_drift": 0,
+            "build_template_review_items": 0,
+            "build_template_warnings": 0,
         },
         "per_repo": [
             {
@@ -162,9 +161,8 @@ def sample_report(planned_changes: list[dict] | None = None) -> dict:
                 "has_helm": True,
                 "has_options": True,
                 "comparable": True,
-                "boilerplate_updates": [],
-                "boilerplate_warnings": [],
-                "boilerplate_diffs": [],
+                "build_template_review_items": [],
+                "build_template_warnings": [],
             }
         ],
         "no_changes": {},
