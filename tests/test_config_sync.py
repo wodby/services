@@ -458,6 +458,26 @@ class ConfigSyncReportTest(unittest.TestCase):
             self.assertEqual(item["planned_release"]["status"], "planned")
             self.assertEqual(item["planned_release"]["tag"], "1.0.1")
 
+    def test_external_repo_without_inventory_is_ignored(self) -> None:
+        report = sample_report()
+        report["per_repo"] = []
+        report["external_services"] = ["service-external"]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            report_dir, inventory_path = self.write_inputs(Path(tmp_dir), report)
+
+            result = augment_report(
+                report_dir,
+                "service-external",
+                inventory_path,
+                "wodby",
+                "report",
+                self.generator,
+                self.extractor,
+            )
+
+            self.assertEqual(result["external_services"], ["service-external"])
+            self.assertEqual(result["per_repo"], [])
+
     def test_divergence_blocks_existing_image_release(self) -> None:
         self.generator.service_data[("service-demo", "service.yml")] = service_data(
             [snapshot_config(version=None)],

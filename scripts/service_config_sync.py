@@ -574,9 +574,17 @@ def augment_report(
 
     report_path = report_dir / "service-update-report.json"
     report = json.loads(report_path.read_text())
-    item = find_report_item(report, repo)
     if mode not in ("off", "report", "apply"):
         raise ConfigSyncError(f"unsupported config sync mode: {mode}")
+
+    if repo in report.get("external_services", []) or repo in report.get("missing_service_yml", []):
+        if mode != "off":
+            inventory = load_inventory(inventory_path)
+            if inventory_for_repo(inventory, repo) is not None:
+                raise ConfigSyncError(f"config sync cannot run for excluded repository {repo}")
+        return report
+
+    item = find_report_item(report, repo)
     if mode == "off":
         item["config_sync"] = {"mode": mode, "status": "off", "changes": 0}
     else:
