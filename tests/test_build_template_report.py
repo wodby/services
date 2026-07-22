@@ -32,6 +32,15 @@ class FakeGenerator(UpdateReportGenerator):
 
 
 class BuildTemplateReportTest(unittest.TestCase):
+    def test_nginx_proxy_uses_nginx_eol_data(self) -> None:
+        generator = FakeGenerator()
+        generator._eol_product_index_cache = {"nginx": "nginx"}
+
+        self.assertEqual(
+            generator.resolve_eol_product_name("service-nginx-proxy", "nginx-proxy"),
+            "nginx",
+        )
+
     def test_build_template_branch_and_dockerfile_are_current(self) -> None:
         generator = FakeGenerator()
         generator.repo_files[("service-node", "Dockerfile")] = "FROM node\n"

@@ -94,6 +94,7 @@ The initial `service-nginx` entry intentionally runs in the workflow's default
 | Service | Repository |
 | --- | --- |
 | Nginx | [wodby/service-nginx](https://github.com/wodby/service-nginx) |
+| Nginx Proxy | [wodby/service-nginx-proxy](https://github.com/wodby/service-nginx-proxy) |
 | Nginx for PHP | [wodby/service-php-nginx](https://github.com/wodby/service-php-nginx) |
 | Nginx for Drupal | [wodby/service-drupal-nginx](https://github.com/wodby/service-drupal-nginx) |
 | Nginx for WordPress | [wodby/service-wordpress-nginx](https://github.com/wodby/service-wordpress-nginx) |

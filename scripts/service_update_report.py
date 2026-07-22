@@ -40,6 +40,7 @@ EOL_PRODUCT_ALIASES = {
     "httpd": "apache-http-server",
     "matomo": "php",
     "nextjs": "nodejs",
+    "nginx-proxy": "nginx",
     "node": "nodejs",
     "php-httpd": "apache-http-server",
     "postgis": "postgresql",
