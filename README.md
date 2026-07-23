@@ -4,9 +4,13 @@ This repository is the index of Wodby-managed service repositories for Wodby
 2.0.
 
 Services are reusable definitions for application runtimes, databases, search
-engines, infrastructure components, and integrations. A service becomes useful
-inside a [stack](https://github.com/wodby/stacks), where it is configured as a
-stack service and later deployed as an app service.
+engines, infrastructure components, and integrations.
+
+Application services are assembled into
+[stacks](https://github.com/wodby/stacks) and deployed as part of user
+applications. Kubernetes system services are different: Wodby installs and
+manages them as cluster infrastructure when required by the cluster provider
+and configuration. They are not user-deployable catalog components.
 
 - Service catalog: https://wodby.com/services
 - Service docs: https://wodby.com/docs/2.0/services/
@@ -64,8 +68,31 @@ checked against every service option. If their contents differ, the workflow
 requires version-specific `configs[]` entries instead of choosing one image
 silently.
 
+## Repository presentation
+
+[`scripts/update_repository_readmes.py`](scripts/update_repository_readmes.py)
+renders the README in every indexed `service-*` repository from its manifests.
+It links build templates and consuming stacks, and gives infrastructure
+services system-app content instead of user-deployment instructions.
+The aggregate and individual repositories must be checked out as sibling
+directories, and the script requires PyYAML.
+
+```bash
+python scripts/update_repository_readmes.py --check
+python scripts/update_repository_readmes.py --write
+```
+
 The initial `service-nginx` entry intentionally runs in the workflow's default
 `report` mode while its version-specific snapshots are prepared.
+
+[`scripts/update_github_metadata.py`](scripts/update_github_metadata.py) applies
+the same classification to GitHub descriptions, topics, and catalog homepages.
+It requires the GitHub CLI and `WODBY_GITHUB_TOKEN`.
+
+```bash
+python scripts/update_github_metadata.py --check
+python scripts/update_github_metadata.py --write
+```
 
 ## Managed services
 
@@ -146,7 +173,11 @@ The initial `service-nginx` entry intentionally runs in the workflow's default
 | Mailpit | [wodby/service-mailpit](https://github.com/wodby/service-mailpit) |
 | OpenSMTPD | [wodby/service-opensmtpd](https://github.com/wodby/service-opensmtpd) |
 
-### Kubernetes and platform
+### Kubernetes system services
+
+These services back Wodby-managed Kubernetes infrastructure. They are installed
+through system stacks during cluster provisioning and are not intended for
+user-created application stacks.
 
 | Service | Repository |
 | --- | --- |
@@ -156,6 +187,7 @@ The initial `service-nginx` entry intentionally runs in the workflow's default
 | Kube State Metrics | [wodby/service-kube-state-metrics](https://github.com/wodby/service-kube-state-metrics) |
 | AWS LB Controller | [wodby/service-aws-lb-controller](https://github.com/wodby/service-aws-lb-controller) |
 | Envoy Gateway | [wodby/service-envoy-gateway](https://github.com/wodby/service-envoy-gateway) |
+| Ingress Nginx | [wodby/service-ingress-nginx](https://github.com/wodby/service-ingress-nginx) |
 | FRPC | [wodby/service-frpc](https://github.com/wodby/service-frpc) |
 
 ### Storage
