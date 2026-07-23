@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from service_report_email import build_body, event_counts, repo_items  # noqa: E402
+from service_report_email import build_body, build_html_body, event_counts, repo_items  # noqa: E402
 from service_update_report import UpdateReportGenerator, render_markdown  # noqa: E402
 
 
@@ -135,6 +135,68 @@ class BuildTemplateReportTest(unittest.TestCase):
         self.assertEqual(counts["build_template_review_items"], 1)
         self.assertIn("Build Template Review", body)
         self.assertIn("new build template tag", body)
+
+    def test_email_body_includes_config_sync_status(self) -> None:
+        report = sample_build_template_report()
+        report["per_repo"][0]["config_sync"] = {
+            "mode": "report",
+            "status": "blocked",
+            "eligible": 2,
+            "changes": 1,
+            "blockers": ["split configs into version-specific entries"],
+            "diffs": ["--- preset.conf.tmpl\n+++ preset.conf.tmpl\n-old\n+new"],
+        }
+        report["totals"].update(
+            {
+                "config_sync_eligible": 2,
+                "config_sync_current": 0,
+                "config_sync_drift": 0,
+                "config_sync_blocked": 1,
+                "config_sync_failed": 0,
+                "config_sync_skipped": 0,
+            }
+        )
+        reports = [report]
+        items = repo_items(reports)
+        counts = event_counts(reports, items, "success", "success")
+
+        body = build_body(
+            reports,
+            items,
+            counts,
+            run_url="https://example.test/run",
+            event="workflow_dispatch",
+            sha="abcdef123456",
+            workflow_result="success",
+            artifact_result="success",
+        )
+
+        self.assertEqual(counts["config_sync_checked"], 1)
+        self.assertEqual(counts["config_sync_blocked"], 1)
+        self.assertIn("Config Synchronization", body)
+        self.assertIn("eligible configs: 2", body)
+        self.assertIn("split configs into version-specific entries", body)
+        self.assertIn("preset.conf.tmpl", body)
+
+        html_body = build_html_body(
+            reports,
+            items,
+            counts,
+            run_url="https://example.test/run",
+            event="workflow_dispatch",
+            sha="abcdef123456",
+            workflow_result="success",
+            artifact_result="success",
+        )
+        self.assertIn("Config Synchronization", html_body)
+        self.assertIn("Eligible configs", html_body)
+        self.assertIn("split configs into version-specific entries", html_body)
+        self.assertIn("preset.conf.tmpl", html_body)
+
+        markdown = render_markdown(report)
+        self.assertIn("## Config Synchronization", markdown)
+        self.assertIn("Image-backed configs checked: 2", markdown)
+        self.assertIn("preset.conf.tmpl", markdown)
 
 
 def sample_build_template_report() -> dict:

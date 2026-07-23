@@ -549,7 +549,15 @@ def render_planned_diffs(planned_changes: list[dict[str, Any]]) -> list[str]:
                         lineterm="",
                     )
                 )
-                lines.extend(unified[2:])
+                rendered_lines = unified[2:]
+                if not rendered_lines and change.get("before_sha256") != change.get("after_sha256"):
+                    rendered_lines = [
+                        "@@ exact file content @@",
+                        f"-sha256: {change.get('before_sha256') or 'missing'}",
+                        f"+sha256: {change.get('after_sha256') or 'missing'}",
+                        " content differs only in line endings or a trailing newline",
+                    ]
+                lines.extend(rendered_lines)
             else:
                 lines.append(f"@@ {path} @@")
                 lines.append(f"-{key}: {format_diff_value(change.get('before'))}")
@@ -912,6 +920,7 @@ class UpdateReportGenerator:
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
         self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self._service_data_at_ref_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._wodby_chart_cache: dict[str, str] = {}
         self._wodby_chart_values_cache: dict[str, dict[str, Any]] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
@@ -1021,6 +1030,28 @@ class UpdateReportGenerator:
             raise RuntimeError(f"{repo} {manifest_path} did not decode to a mapping")
 
         self._service_data_cache[cache_key] = service_data
+        return service_data
+
+    def get_service_data_at_ref(
+        self,
+        repo: str,
+        ref: str,
+        manifest_path: str = "service.yml",
+    ) -> dict[str, Any] | None:
+        cache_key = (repo, ref, manifest_path)
+        if cache_key in self._service_data_at_ref_cache:
+            return self._service_data_at_ref_cache[cache_key]
+
+        service_text = self.get_repo_file_at_ref(repo, ref, manifest_path)
+        if service_text is None:
+            self._service_data_at_ref_cache[cache_key] = None
+            return None
+
+        service_data = yaml.safe_load(service_text) or {}
+        if not isinstance(service_data, dict):
+            raise RuntimeError(f"{repo} {manifest_path} at {ref} did not decode to a mapping")
+
+        self._service_data_at_ref_cache[cache_key] = service_data
         return service_data
 
     def get_repo_manifest_paths(self, repo: str) -> list[str]:
@@ -2897,7 +2928,47 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Repos updated by workflow: {report['totals'].get('applied_updates', 0)}")
     if "apply_failures" in report["totals"]:
         lines.append(f"- Repos with update apply failures: {report['totals'].get('apply_failures', 0)}")
+    if "config_sync_eligible" in report["totals"]:
+        lines.append(f"- Image-backed configs checked: {report['totals'].get('config_sync_eligible', 0)}")
+        lines.append(f"- Repos with current config snapshots: {report['totals'].get('config_sync_current', 0)}")
+        lines.append(f"- Repos with config snapshot drift: {report['totals'].get('config_sync_drift', 0)}")
+        lines.append(f"- Repos with blocked config checks: {report['totals'].get('config_sync_blocked', 0)}")
+        lines.append(f"- Repos with failed config checks: {report['totals'].get('config_sync_failed', 0)}")
+        lines.append(f"- Configs deliberately skipped: {report['totals'].get('config_sync_skipped', 0)}")
     lines.append("")
+
+    config_sync_items = [
+        (item, item.get("config_sync") or {})
+        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
+        if int((item.get("config_sync") or {}).get("eligible") or 0) > 0
+        or (item.get("config_sync") or {}).get("status") in ("blocked", "failed")
+        or bool((item.get("config_sync") or {}).get("skipped"))
+    ]
+    if config_sync_items:
+        lines.append("## Config Synchronization")
+        lines.append("")
+        lines.append(
+            "Image-derived editable defaults are reported separately from service manifest and release changes."
+        )
+        lines.append("")
+        for item, result in config_sync_items:
+            lines.append(f"### {item['repo']}")
+            lines.append(f"- Status: `{result.get('status', 'unknown')}`")
+            lines.append(f"- Mode: `{result.get('mode', 'unknown')}`")
+            lines.append(f"- Eligible configs: {int(result.get('eligible') or 0)}")
+            lines.append(f"- Changed snapshots: {int(result.get('changes') or 0)}")
+            for blocker in result.get("blockers") or []:
+                lines.append(f"- Blocker: {blocker}")
+            if result.get("reason"):
+                lines.append(f"- Failure: {result['reason']}")
+            for skipped in result.get("skipped") or []:
+                lines.append(f"- Skipped: {skipped}")
+            lines.append("")
+            for config_diff in result.get("diffs") or []:
+                lines.append("```diff")
+                lines.extend(str(config_diff).splitlines())
+                lines.append("```")
+                lines.append("")
 
     planned_change_items = [
         item

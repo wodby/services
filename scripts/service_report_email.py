@@ -106,13 +106,32 @@ def event_counts(
             if (item.get("apply_result") or {}).get("status") in ("applied", "tagged", "already_applied")
         ),
         "apply_failures": sum(1 for item in items if (item.get("apply_result") or {}).get("status") == "failed"),
+        "config_sync_checked": sum(
+            1 for item in items if int((item.get("config_sync") or {}).get("eligible") or 0) > 0
+        ),
+        "config_sync_current": sum(
+            1 for item in items if (item.get("config_sync") or {}).get("status") == "current"
+        ),
+        "config_sync_drift": sum(
+            1 for item in items if (item.get("config_sync") or {}).get("status") == "drift"
+        ),
+        "config_sync_blocked": sum(
+            1 for item in items if (item.get("config_sync") or {}).get("status") == "blocked"
+        ),
+        "config_sync_failed": sum(
+            1 for item in items if (item.get("config_sync") or {}).get("status") == "failed"
+        ),
+        "config_sync_skipped": sum(
+            len((item.get("config_sync") or {}).get("skipped") or []) for item in items
+        ),
         "warnings": sum(1 for item in items if item.get("warnings")),
         "special": sum(int((report.get("totals") or {}).get("special") or 0) for report in reports),
     }
 
 
 def has_email_worthy_events(counts: dict[str, int]) -> bool:
-    return any(value > 0 for value in counts.values())
+    informational = {"config_sync_checked", "config_sync_current", "config_sync_skipped"}
+    return any(value > 0 for key, value in counts.items() if key not in informational)
 
 
 def append_repo_messages(lines: list[str], title: str, items: list[dict[str, Any]], key: str) -> None:
@@ -125,6 +144,37 @@ def append_repo_messages(lines: list[str], title: str, items: list[dict[str, Any
         lines.append(f"{item['repo']}:")
         for message in messages:
             lines.append(f"- {message}")
+        lines.append("")
+
+
+def append_config_sync(lines: list[str], items: list[dict[str, Any]]) -> None:
+    selected = [
+        (item, item.get("config_sync") or {})
+        for item in items
+        if int((item.get("config_sync") or {}).get("eligible") or 0) > 0
+        or (item.get("config_sync") or {}).get("status") in ("blocked", "failed")
+        or bool((item.get("config_sync") or {}).get("skipped"))
+    ]
+    if not selected:
+        return
+
+    lines.append("Config Synchronization")
+    lines.append("")
+    for item, result in selected:
+        lines.append(f"{item['repo']}:")
+        lines.append(f"- status: {result.get('status', 'unknown')}")
+        lines.append(f"- mode: {result.get('mode', 'unknown')}")
+        lines.append(f"- eligible configs: {int(result.get('eligible') or 0)}")
+        lines.append(f"- changed snapshots: {int(result.get('changes') or 0)}")
+        for blocker in result.get("blockers") or []:
+            lines.append(f"- blocker: {blocker}")
+        if result.get("reason"):
+            lines.append(f"- failure: {result['reason']}")
+        for skipped in result.get("skipped") or []:
+            lines.append(f"- skipped: {skipped}")
+        for config_diff in result.get("diffs") or []:
+            lines.append("config diff:")
+            lines.extend(str(config_diff).rstrip().splitlines())
         lines.append("")
 
 
@@ -305,6 +355,7 @@ def build_body(
         lines.append("")
 
     append_repo_planned_changes(lines, items)
+    append_config_sync(lines, items)
     append_repo_dry_run_changes(lines, items)
     append_repo_build_template_review(lines, items)
     append_repo_apply_results(lines, items)
@@ -409,6 +460,52 @@ def html_repo_messages(title: str, items: list[dict[str, Any]], key: str) -> str
             "<div style=\"margin:0 0 14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:6px;\">"
             f"<h3 style=\"margin:0;font-size:16px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
             f"{html_message_list(messages)}"
+            "</div>"
+        )
+    return "".join(blocks)
+
+
+def html_config_sync(items: list[dict[str, Any]]) -> str:
+    selected = [
+        (item, item.get("config_sync") or {})
+        for item in items
+        if int((item.get("config_sync") or {}).get("eligible") or 0) > 0
+        or (item.get("config_sync") or {}).get("status") in ("blocked", "failed")
+        or bool((item.get("config_sync") or {}).get("skipped"))
+    ]
+    if not selected:
+        return ""
+
+    blocks = [
+        "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">Config Synchronization</h2>"
+    ]
+    for item, result in selected:
+        status = str(result.get("status") or "unknown")
+        color = "#991b1b" if status in ("blocked", "failed") else (
+            "#92400e" if status == "drift" else "#166534"
+        )
+        rows = [
+            ("Status", f"<strong style=\"color:{color};\">{html.escape(status)}</strong>"),
+            ("Mode", html.escape(str(result.get("mode") or "unknown"))),
+            ("Eligible configs", str(int(result.get("eligible") or 0))),
+            ("Changed snapshots", str(int(result.get("changes") or 0))),
+        ]
+        table_rows = "".join(
+            f"<tr><td style=\"padding:2px 14px 2px 0;color:#6b7280;\">{label}</td>"
+            f"<td style=\"padding:2px 0;color:#111827;\">{value}</td></tr>"
+            for label, value in rows
+        )
+        messages = [f"Blocker: {message}" for message in result.get("blockers") or []]
+        if result.get("reason"):
+            messages.append(f"Failure: {result['reason']}")
+        messages.extend(f"Skipped: {message}" for message in result.get("skipped") or [])
+        diffs = "".join(html_diff(str(config_diff)) for config_diff in result.get("diffs") or [])
+        blocks.append(
+            "<div style=\"margin:0 0 14px 0;padding:12px;border:1px solid #e5e7eb;border-radius:6px;\">"
+            f"<h3 style=\"margin:0 0 8px 0;font-size:16px;color:#111827;\">{html.escape(str(item['repo']))}</h3>"
+            f"<table role=\"presentation\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;\">{table_rows}</table>"
+            f"{html_message_list(messages)}"
+            f"{diffs}"
             "</div>"
         )
     return "".join(blocks)
@@ -666,6 +763,7 @@ def build_html_body(
             "</div>"
         )
     body.append(html_planned_changes(items))
+    body.append(html_config_sync(items))
     body.append(html_dry_run_changes(items))
     body.append(html_build_template_review(items))
     body.append(html_apply_results(items))
@@ -684,6 +782,8 @@ def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str
         f"{counts['updates']} update repos, "
         f"{counts['dry_run_updates']} dry-run repos, "
         f"{counts['build_template_review_items']} build-template repos, "
+        f"config {counts['config_sync_drift']} drift/"
+        f"{counts['config_sync_blocked']} blocked/{counts['config_sync_failed']} failed, "
         f"{counts['major_version_notifications']} major-version repos, "
         f"{counts['helm_major_version_notifications']} Helm-major repos ({short_sha})"
     )

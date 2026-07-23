@@ -17,6 +17,7 @@ import yaml
 CONFIG_CHANGE_TYPE = "config_snapshot"
 DEFAULT_PLATFORM = "linux/amd64"
 MAX_CONFIG_BYTES = 1024 * 1024
+COMMAND_TIMEOUT_SECONDS = 10 * 60
 
 
 class ConfigSyncError(RuntimeError):
@@ -39,6 +40,8 @@ class ConfigSyncPlan:
     changes: list[dict[str, Any]]
     current: list[str]
     blockers: list[str]
+    eligible: int
+    skipped: list[str]
 
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -49,7 +52,18 @@ def sha256_text(content: str) -> str:
 
 
 def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
-    process = subprocess.run(args, check=False, capture_output=True, text=True)
+    try:
+        process = subprocess.run(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigSyncError(
+            f"{' '.join(args[:2])} timed out after {COMMAND_TIMEOUT_SECONDS} seconds"
+        ) from exc
     if process.returncode != 0:
         output = (process.stderr or process.stdout).strip()
         raise ConfigSyncError(f"{' '.join(args[:2])} failed: {output}")
@@ -180,9 +194,19 @@ class DockerConfigExtractor:
 
 def load_inventory(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(data, dict) or not isinstance(data.get("services"), dict):
-        raise ConfigSyncError("config sync inventory must contain a services mapping")
+    if not isinstance(data, dict):
+        raise ConfigSyncError("config sync inventory must be a mapping")
+    if not isinstance(data.get("autoDiscover", False), bool):
+        raise ConfigSyncError("config sync inventory autoDiscover must be a boolean")
+    if "services" not in data:
+        data["services"] = {}
+    if not isinstance(data.get("services"), dict):
+        raise ConfigSyncError("config sync inventory services must be a mapping")
     return data
+
+
+def auto_discover_enabled(inventory: dict[str, Any]) -> bool:
+    return bool(inventory.get("autoDiscover", False))
 
 
 def inventory_for_repo(inventory: dict[str, Any], repo: str) -> dict[str, Any] | None:
@@ -193,6 +217,199 @@ def inventory_for_repo(inventory: dict[str, Any], repo: str) -> dict[str, Any] |
     if not isinstance(entry, dict) or not isinstance(entry.get("manifests"), dict):
         raise ConfigSyncError(f"config sync inventory for {repo} must contain a manifests mapping")
     return entry
+
+
+def service_name_to_repo(generator: Any, service_name: str) -> str:
+    resolver = getattr(generator, "service_name_to_repo", None)
+    if callable(resolver):
+        return str(resolver(service_name))
+    return service_name if service_name.startswith("service-") else f"service-{service_name}"
+
+
+def planned_parent_ref(
+    manifest_path: str,
+    parent_repo: str,
+    service_data: dict[str, Any],
+    planned_changes: list[dict[str, Any]],
+) -> str:
+    for change in planned_changes:
+        if change.get("change_type") != "parent_service_version":
+            continue
+        if str(change.get("file") or "service.yml") != manifest_path:
+            continue
+        if str(change.get("parent_repo") or "") != parent_repo:
+            continue
+        target = str(change.get("after") or "").strip()
+        if target:
+            return target
+
+    return str(service_data.get("fromVersion") or "").strip()
+
+
+def resolve_source_context(
+    repo: str,
+    manifest_path: str,
+    service_data: dict[str, Any],
+    planned_changes: list[dict[str, Any]],
+    generator: Any,
+    seen: set[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Resolve image options/workloads through immutable service inheritance tags."""
+    options = service_data.get("options") or []
+    workloads = service_data.get("workloads") or []
+    parent_name = str(service_data.get("from") or "").strip()
+    if (options and workloads) or not parent_name:
+        return {"options": options, "workloads": workloads}
+
+    parent_repo = service_name_to_repo(generator, parent_name)
+    parent_ref = planned_parent_ref(manifest_path, parent_repo, service_data, planned_changes)
+    if not parent_ref:
+        raise ConfigSyncError(
+            f"service {service_data.get('name') or repo} inherits from {parent_repo} "
+            "but does not define fromVersion"
+        )
+
+    seen = set(seen or set())
+    cycle_key = (parent_repo, parent_ref)
+    if cycle_key in seen:
+        raise ConfigSyncError(f"service inheritance cycle detected at {parent_repo}@{parent_ref}")
+    seen.add(cycle_key)
+
+    loader = getattr(generator, "get_service_data_at_ref", None)
+    if not callable(loader):
+        raise ConfigSyncError("service data provider cannot load parent manifests at a release tag")
+    parent_data = loader(parent_repo, parent_ref, "service.yml")
+    if not isinstance(parent_data, dict):
+        raise ConfigSyncError(f"parent manifest service.yml was not found in {parent_repo}@{parent_ref}")
+
+    parent_context = resolve_source_context(
+        parent_repo,
+        "service.yml",
+        parent_data,
+        [],
+        generator,
+        seen,
+    )
+    return {
+        "options": options or parent_context.get("options") or [],
+        "workloads": workloads or parent_context.get("workloads") or [],
+    }
+
+
+def infer_source_container(source_data: dict[str, Any]) -> tuple[str, str]:
+    """Choose an unambiguous image container, preferring the primary workload."""
+    candidates: list[tuple[str, str, bool]] = []
+    for workload in source_data.get("workloads") or []:
+        if not isinstance(workload, dict):
+            continue
+        workload_name = str(workload.get("name") or "").strip()
+        primary = bool(workload.get("primary"))
+        for container in workload.get("containers") or []:
+            if not isinstance(container, dict) or not str(container.get("image") or "").strip():
+                continue
+            container_name = str(container.get("name") or "").strip()
+            if workload_name and container_name:
+                candidates.append((workload_name, container_name, primary))
+
+    primary_candidates = [candidate for candidate in candidates if candidate[2]]
+    selected = primary_candidates if len(primary_candidates) == 1 else candidates
+    if len(selected) != 1:
+        labels = ", ".join(f"{workload}/{container}" for workload, container, _ in candidates)
+        detail = labels or "none"
+        raise ConfigSyncError(
+            f"could not infer one image source container; candidates: {detail}; "
+            "configure workload and container explicitly"
+        )
+    return selected[0][0], selected[0][1]
+
+
+def discover_config_selections(
+    service_data: dict[str, Any],
+    source_data: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build sync selections for image-backed configs and explain other config types."""
+    eligible_configs: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for config in service_data.get("configs") or []:
+        if not isinstance(config, dict):
+            skipped.append("ignored a config entry that is not a mapping")
+            continue
+        identity = config_identity(config)
+        if config.get("helm"):
+            skipped.append(f"config `{identity}` uses Helm values rather than an image filepath")
+            continue
+        if config.get("filename"):
+            skipped.append(f"config `{identity}` uses a generated filename rather than an image filepath")
+            continue
+        if not config.get("filepath"):
+            skipped.append(f"config `{identity}` does not define an image filepath")
+            continue
+        eligible_configs.append(config)
+
+    if not eligible_configs:
+        return [], skipped
+
+    workload, container = infer_source_container(source_data)
+    selections = []
+    seen: set[tuple[str, str | None]] = set()
+    for config in eligible_configs:
+        version = str(config.get("version") or "").strip() or None
+        key = (str(config.get("name") or ""), version)
+        if key in seen:
+            continue
+        seen.add(key)
+        selection: dict[str, Any] = {
+            "name": key[0],
+            "workload": workload,
+            "container": container,
+        }
+        if version is not None:
+            selection["version"] = version
+        selections.append(selection)
+    return selections, skipped
+
+
+def merge_config_selections(
+    discovered: list[dict[str, Any]],
+    overrides: list[dict[str, Any]],
+    defaults: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Apply sparse inventory overrides without disabling automatic discovery."""
+    defaults = defaults or {}
+    merged = [{**defaults, **selection} for selection in discovered]
+    positions = {
+        (
+            str(selection.get("name") or "").strip(),
+            str(selection.get("version") or "").strip() or None,
+        ): index
+        for index, selection in enumerate(merged)
+    }
+    for override in overrides:
+        if not isinstance(override, dict):
+            raise ConfigSyncError("config sync selection override must be a mapping")
+        name = str(override.get("name") or "").strip()
+        version = str(override.get("version") or "").strip() or None
+        key = (name, version)
+        if not name:
+            raise ConfigSyncError("config sync selection override must specify a config name")
+        matching_keys = [
+            candidate
+            for candidate in positions
+            if candidate[0] == name and (version is None or candidate[1] == version)
+        ]
+        if matching_keys:
+            for matching_key in matching_keys:
+                merged[positions[matching_key]].update(override)
+        else:
+            positions[key] = len(merged)
+            selection = {**defaults, **override}
+            # Preserve the legacy explicit-inventory behavior where a name
+            # without a version selects every matching config. Auto-discovered
+            # entries always carry their concrete fallback/exact identity.
+            if version is None and not discovered:
+                selection["_matchAllVersions"] = True
+            merged.append(selection)
+    return merged
 
 
 def find_container_image(service_data: dict[str, Any], workload_name: str, container_name: str) -> str:
@@ -264,11 +481,18 @@ def matching_configs(service_data: dict[str, Any], selection: dict[str, Any]) ->
     if not name:
         raise ConfigSyncError("config sync selection must specify a config name")
     selected_version = selection.get("version")
+    match_all_versions = bool(selection.get("_matchAllVersions"))
     matches = []
     for config in service_data.get("configs") or []:
         if not isinstance(config, dict) or str(config.get("name") or "") != name:
             continue
         if selected_version is not None and str(config.get("version") or "") != str(selected_version):
+            continue
+        if (
+            selected_version is None
+            and not match_all_versions
+            and str(config.get("version") or "").strip()
+        ):
             continue
         matches.append(config)
     if not matches:
@@ -279,7 +503,7 @@ def matching_configs(service_data: dict[str, Any], selection: dict[str, Any]) ->
 
 def config_identity(config: dict[str, Any]) -> str:
     version = str(config.get("version") or "").strip()
-    return f"{config.get('name')}@{version}" if version else str(config.get("name"))
+    return f"{config.get('name')}@{version}" if version else f"{config.get('name')}@default"
 
 
 def source_dict(extracted: ExtractedConfig, version: str) -> dict[str, str]:
@@ -298,6 +522,7 @@ def plan_config_selection(
     repo: str,
     manifest_path: str,
     service_data: dict[str, Any],
+    source_data: dict[str, Any],
     options: list[Any],
     selection: dict[str, Any],
     planned_changes: list[dict[str, Any]],
@@ -313,7 +538,7 @@ def plan_config_selection(
             f"config sync selection {selection.get('name')} in {repo} {manifest_path} "
             "must specify workload and container"
         )
-    image = find_container_image(service_data, workload, container)
+    image = find_container_image(source_data, workload, container)
     option_tags = target_option_tags(manifest_path, image, options, planned_changes)
     platform = str(selection.get("platform") or DEFAULT_PLATFORM)
 
@@ -324,7 +549,7 @@ def plan_config_selection(
                 f"config {identity} in {repo} {manifest_path} must be a filepath config"
             )
         output_file = manifest_relative_path(manifest_path, config.get("config"))
-        source_path = validate_source_path(selection.get("sourcePath") or config.get("filepath"))
+        source_path_template = str(selection.get("sourcePath") or config.get("filepath") or "")
         config_version = str(config.get("version") or "").strip()
         if config_version:
             if config_version not in option_tags:
@@ -333,10 +558,23 @@ def plan_config_selection(
                 )
             versions = [config_version]
         else:
-            versions = sorted(option_tags)
+            exact_versions = {
+                str(candidate.get("version") or "").strip()
+                for candidate in service_data.get("configs") or []
+                if isinstance(candidate, dict)
+                and str(candidate.get("name") or "") == str(config.get("name") or "")
+                and str(candidate.get("version") or "").strip()
+            }
+            versions = sorted(version for version in option_tags if version not in exact_versions)
+            if not versions:
+                current.append(
+                    f"config `{identity}` fallback is shadowed by exact variants for all service options"
+                )
+                continue
 
         extracted_versions = []
         for version in versions:
+            source_path = validate_source_path(source_path_template.replace("{{version}}", version))
             image_ref = image_with_tag(image, option_tags[version])
             extracted = extractor.extract(image_ref, source_path, platform)
             extracted_versions.append((version, extracted))
@@ -349,7 +587,7 @@ def plan_config_selection(
             )
             raise ConfigSyncError(
                 f"unversioned config {identity} in {repo} {manifest_path} differs across options: "
-                f"{details}; split it into version-specific config entries"
+                f"{details}; add exact version overrides for the differing defaults"
             )
 
         content = extracted_versions[0][1].content
@@ -398,31 +636,97 @@ def plan_repository_configs(
     extractor: Any,
 ) -> ConfigSyncPlan | None:
     repo_inventory = inventory_for_repo(inventory, repo)
-    if repo_inventory is None:
+    auto_discover = auto_discover_enabled(inventory)
+    if repo_inventory is None and not auto_discover:
         return None
 
     changes_by_file: dict[str, dict[str, Any]] = {}
     current: list[str] = []
     blockers: list[str] = []
-    manifests = repo_inventory["manifests"]
-    for manifest_path, manifest_inventory in manifests.items():
-        if not isinstance(manifest_inventory, dict) or not isinstance(manifest_inventory.get("configs"), list):
-            raise ConfigSyncError(f"config sync inventory for {repo} {manifest_path} must contain a configs list")
+    skipped: list[str] = []
+    eligible = 0
+    configured_manifests = (repo_inventory or {}).get("manifests") or {}
+    if auto_discover:
+        manifest_paths = set(generator.get_repo_manifest_paths(repo))
+        manifest_paths.update(configured_manifests)
+    else:
+        manifest_paths = set(configured_manifests)
+
+    for manifest_path in sorted(manifest_paths):
         service_data = generator.get_service_data(repo, manifest_path)
         if not isinstance(service_data, dict):
-            raise ConfigSyncError(f"service manifest {manifest_path} could not be loaded for {repo}")
-        options = service_data.get("options") or []
-        if not options:
-            raise ConfigSyncError(f"service manifest {manifest_path} has no options for config image resolution")
+            blockers.append(f"service manifest {manifest_path} could not be loaded for {repo}")
+            continue
+        try:
+            source_data = resolve_source_context(
+                repo,
+                manifest_path,
+                service_data,
+                report_item.get("planned_changes") or [],
+                generator,
+            )
+        except ConfigSyncError as exc:
+            blockers.append(str(exc))
+            continue
 
-        for selection in manifest_inventory["configs"]:
-            if not isinstance(selection, dict):
-                raise ConfigSyncError(f"config sync selection in {repo} {manifest_path} must be a mapping")
+        manifest_inventory = configured_manifests.get(manifest_path)
+        overrides: list[dict[str, Any]] = []
+        selection_defaults: dict[str, Any] = {}
+        if manifest_inventory is not None:
+            if not isinstance(manifest_inventory, dict):
+                blockers.append(
+                    f"config sync inventory for {repo} {manifest_path} must be a mapping"
+                )
+                continue
+            overrides = manifest_inventory.get("configs") or []
+            selection_defaults = manifest_inventory.get("defaults") or {}
+            if not isinstance(overrides, list) or not isinstance(selection_defaults, dict):
+                blockers.append(
+                    f"config sync inventory for {repo} {manifest_path} must contain mappings "
+                    "in defaults and a configs list"
+                )
+                continue
+
+        if auto_discover:
             try:
+                selections, manifest_skipped = discover_config_selections(service_data, source_data)
+                selections = merge_config_selections(selections, overrides, selection_defaults)
+                skipped.extend(f"{manifest_path}: {message}" for message in manifest_skipped)
+            except ConfigSyncError as exc:
+                blockers.append(f"{manifest_path}: {exc}")
+                continue
+        elif manifest_inventory is not None:
+            selections = merge_config_selections([], overrides, selection_defaults)
+        else:
+            continue
+
+        options = source_data.get("options") or []
+        if not options:
+            if selections:
+                blockers.append(
+                    f"service manifest {manifest_path} has no options for config image resolution"
+                )
+            continue
+
+        for selection in selections:
+            if not isinstance(selection, dict):
+                blockers.append(f"config sync selection in {repo} {manifest_path} must be a mapping")
+                continue
+            try:
+                selected_configs = matching_configs(service_data, selection)
+                if selection.get("skip"):
+                    reason = str(selection["skip"])
+                    skipped.extend(
+                        f"{manifest_path}: config `{config_identity(config)}` is not synchronized: {reason}"
+                        for config in selected_configs
+                    )
+                    continue
+                eligible += len(selected_configs)
                 plan_config_selection(
                     repo,
                     manifest_path,
                     service_data,
+                    source_data,
                     options,
                     selection,
                     report_item.get("planned_changes") or [],
@@ -438,6 +742,8 @@ def plan_repository_configs(
         changes=list(changes_by_file.values()),
         current=current,
         blockers=blockers,
+        eligible=eligible,
+        skipped=skipped,
     )
 
 
@@ -547,6 +853,19 @@ def refresh_report_totals(report: dict[str, Any]) -> None:
     totals["release_blockers"] = sum(
         1 for item in items if (item.get("planned_release") or {}).get("status") == "blocked"
     )
+    config_statuses = [
+        (item.get("config_sync") or {}).get("status")
+        for item in items
+        if item.get("config_sync")
+    ]
+    totals["config_sync_eligible"] = sum(
+        int((item.get("config_sync") or {}).get("eligible") or 0) for item in items
+    )
+    totals["config_sync_skipped"] = sum(
+        len((item.get("config_sync") or {}).get("skipped") or []) for item in items
+    )
+    for status in ("current", "drift", "blocked", "failed", "not_applicable", "not_configured", "off"):
+        totals[f"config_sync_{status}"] = config_statuses.count(status)
 
 
 def find_report_item(report: dict[str, Any], repo: str) -> dict[str, Any]:
@@ -586,11 +905,16 @@ def augment_report(
 
     item = find_report_item(report, repo)
     if mode == "off":
-        item["config_sync"] = {"mode": mode, "status": "off", "changes": 0}
+        item["config_sync"] = {"mode": mode, "status": "off", "changes": 0, "eligible": 0}
     else:
         inventory = load_inventory(inventory_path)
-        if inventory_for_repo(inventory, repo) is None:
-            item["config_sync"] = {"mode": mode, "status": "not_configured", "changes": 0}
+        if inventory_for_repo(inventory, repo) is None and not auto_discover_enabled(inventory):
+            item["config_sync"] = {
+                "mode": mode,
+                "status": "not_configured",
+                "changes": 0,
+                "eligible": 0,
+            }
         else:
             generator = generator or UpdateReportGenerator(owner)
             extractor = extractor or DockerConfigExtractor()
@@ -608,7 +932,10 @@ def augment_report(
                         "mode": mode,
                         "status": "blocked",
                         "changes": len(plan.changes),
+                        "eligible": plan.eligible,
+                        "skipped": plan.skipped,
                         "blockers": plan.blockers,
+                        "diffs": render_planned_diffs(plan.changes),
                     }
                     if item.get("planned_changes"):
                         item["planned_release"] = blocked_release(
@@ -616,10 +943,16 @@ def augment_report(
                             item.get("planned_release"),
                         )
                 else:
+                    status = "not_applicable" if plan.eligible == 0 else (
+                        "drift" if plan.changes else "current"
+                    )
                     item["config_sync"] = {
                         "mode": mode,
-                        "status": "drift" if plan.changes else "current",
+                        "status": status,
                         "changes": len(plan.changes),
+                        "eligible": plan.eligible,
+                        "skipped": plan.skipped,
+                        "diffs": render_planned_diffs(plan.changes),
                     }
                     if mode == "apply":
                         item.setdefault("planned_changes", []).extend(plan.changes)
@@ -638,13 +971,32 @@ def augment_report(
                             item.setdefault("warnings", []).append(reason)
             except Exception as exc:
                 reason = f"config synchronization failed: {exc}"
-                item["config_sync"] = {"mode": mode, "status": "failed", "changes": 0, "reason": str(exc)}
+                item["config_sync"] = {
+                    "mode": mode,
+                    "status": "failed",
+                    "changes": 0,
+                    "eligible": 0,
+                    "reason": str(exc),
+                    "diffs": [],
+                }
                 item.setdefault("warnings", []).append(reason)
                 if item.get("planned_changes"):
                     item["planned_release"] = blocked_release(reason, item.get("planned_release"))
 
-    item["planned_diffs"] = render_planned_diffs(item.get("planned_changes") or [])
-    item["dry_run_diffs"] = render_planned_diffs(item.get("dry_run_changes") or [])
+    item["planned_diffs"] = render_planned_diffs(
+        [
+            change
+            for change in item.get("planned_changes") or []
+            if change.get("change_type") != CONFIG_CHANGE_TYPE
+        ]
+    )
+    item["dry_run_diffs"] = render_planned_diffs(
+        [
+            change
+            for change in item.get("dry_run_changes") or []
+            if change.get("change_type") != CONFIG_CHANGE_TYPE
+        ]
+    )
     refresh_report_totals(report)
     report_path.write_text(json.dumps(report, indent=2))
     (report_dir / "service-update-report.md").write_text(render_markdown(report))

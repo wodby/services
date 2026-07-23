@@ -1,11 +1,69 @@
+autoDiscover: true
+
+# Image-backed filepath configs are discovered from every managed service
+# manifest. Entries below only correct image source paths that intentionally
+# differ from the manifest filepath used when mounting the editable config, or
+# explain a version whose default does not exist in its corresponding image.
 services:
-  service-nginx:
+  service-drupal-nginx:
+    manifests:
+      10/service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/drupal10.conf.tmpl
+      11/service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/drupal11.conf.tmpl
+        configs:
+        - name: drupal11
+          version: '1.25'
+          skip: the Drupal 11 preset is not present in the Nginx 1.25 image
+  service-drupal-varnish:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/drupal.vcl.tmpl
+  service-drupal-vinyl:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/drupal.vcl.tmpl
+  service-httpd:
     manifests:
       service.yml:
         configs:
         - name: main
-          workload: main
-          container: nginx
-        - name: vhost
-          workload: main
-          container: nginx
+          sourcePath: /etc/gotpl/httpd.conf.tmpl
+  service-laravel-nginx:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/laravel.conf.tmpl
+        configs:
+        - name: preset
+          version: '1.25'
+          skip: the Laravel preset is not present in the Nginx 1.25 image
+  service-matomo-nginx:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/matomo.conf.tmpl
+  service-postgres:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/postgresql-{{version}}.conf.tmpl
+  service-wordpress-nginx:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/wordpress.conf.tmpl
+  service-wordpress-varnish:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/wordpress.vcl.tmpl
+  service-wordpress-vinyl:
+    manifests:
+      service.yml:
+        defaults:
+          sourcePath: /etc/gotpl/presets/wordpress.vcl.tmpl

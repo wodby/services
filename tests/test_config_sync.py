@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ from service_config_sync import (  # noqa: E402
     apply_snapshot_changes,
     augment_report,
     plan_repository_configs,
+    run_command,
     sha256_text,
     validate_repo_path,
     validate_source_path,
@@ -29,6 +31,7 @@ from service_update_report import render_planned_diffs  # noqa: E402
 class FakeGenerator:
     def __init__(self) -> None:
         self.service_data: dict[tuple[str, str], dict] = {}
+        self.service_data_refs: dict[tuple[str, str, str], dict] = {}
         self.repo_files: dict[tuple[str, str], str] = {}
         self.tags: set[str] = {"1.0.0"}
 
@@ -37,6 +40,21 @@ class FakeGenerator:
 
     def get_repo_file(self, repo: str, path: str) -> str | None:
         return self.repo_files.get((repo, path))
+
+    def get_repo_manifest_paths(self, repo: str) -> list[str]:
+        return sorted(path for candidate, path in self.service_data if candidate == repo)
+
+    def get_service_data_at_ref(
+        self,
+        repo: str,
+        ref: str,
+        manifest_path: str = "service.yml",
+    ) -> dict | None:
+        return self.service_data_refs.get((repo, ref, manifest_path))
+
+    @staticmethod
+    def service_name_to_repo(service_name: str) -> str:
+        return service_name if service_name.startswith("service-") else f"service-{service_name}"
 
     def get_github_tags(self, owner: str, repo: str) -> set[str]:
         return self.tags
@@ -173,6 +191,172 @@ def sample_report(planned_changes: list[dict] | None = None) -> dict:
 
 
 class ConfigSyncPlanningTest(unittest.TestCase):
+    def test_auto_discovers_image_filepath_configs(self) -> None:
+        generator = FakeGenerator()
+        generator.service_data[("service-demo", "service.yml")] = service_data(
+            [
+                snapshot_config(),
+                {"name": "helm", "config": "helm.yml", "helm": "config.value"},
+            ]
+        )
+        generator.repo_files[("service-demo", "main.conf")] = "same\n"
+        extractor = FakeExtractor({("wodby/demo:1-old", "/etc/main.conf"): "same\n"})
+
+        plan = plan_repository_configs(
+            "service-demo",
+            {"planned_changes": []},
+            {"autoDiscover": True, "services": {}},
+            generator,
+            extractor,
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.eligible, 1)
+        self.assertEqual(plan.changes, [])
+        self.assertIn("uses Helm values", plan.skipped[0])
+        self.assertIn("matches its image source", plan.current[0])
+
+    def test_auto_discovery_resolves_inherited_source_context(self) -> None:
+        generator = FakeGenerator()
+        generator.service_data[("service-child", "service.yml")] = {
+            "name": "child",
+            "from": "parent",
+            "fromVersion": "1.2.3",
+            "configs": [snapshot_config()],
+        }
+        generator.service_data_refs[("service-parent", "1.2.3", "service.yml")] = service_data([])
+        generator.repo_files[("service-child", "main.conf")] = "same\n"
+        extractor = FakeExtractor({("wodby/demo:1-old", "/etc/main.conf"): "same\n"})
+
+        plan = plan_repository_configs(
+            "service-child",
+            {"planned_changes": []},
+            {"autoDiscover": True, "services": {}},
+            generator,
+            extractor,
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.eligible, 1)
+        self.assertEqual(plan.blockers, [])
+        self.assertEqual(extractor.calls[0][:2], ("wodby/demo:1-old", "/etc/main.conf"))
+
+    def test_auto_discovery_merges_sparse_source_path_override(self) -> None:
+        generator = FakeGenerator()
+        generator.service_data[("service-demo", "service.yml")] = service_data(
+            [snapshot_config(), snapshot_config("extra")]
+        )
+        generator.repo_files[("service-demo", "main.conf")] = "main\n"
+        generator.repo_files[("service-demo", "extra.conf")] = "extra\n"
+        extractor = FakeExtractor(
+            {
+                ("wodby/demo:1-old", "/image/main.conf"): "main\n",
+                ("wodby/demo:1-old", "/etc/extra.conf"): "extra\n",
+            }
+        )
+        sync_inventory = {
+            "autoDiscover": True,
+            "services": {
+                "service-demo": {
+                    "manifests": {
+                        "service.yml": {
+                            "configs": [{"name": "main", "sourcePath": "/image/main.conf"}]
+                        }
+                    }
+                }
+            },
+        }
+
+        plan = plan_repository_configs(
+            "service-demo", {"planned_changes": []}, sync_inventory, generator, extractor
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.eligible, 2)
+        self.assertCountEqual(
+            [call[1] for call in extractor.calls], ["/etc/extra.conf", "/image/main.conf"]
+        )
+
+    def test_source_path_can_interpolate_config_version(self) -> None:
+        generator = FakeGenerator()
+        generator.service_data[("service-demo", "service.yml")] = service_data(
+            [snapshot_config()], [{"version": "1", "tag": "1-old"}]
+        )
+        generator.repo_files[("service-demo", "main.conf")] = "same\n"
+        extractor = FakeExtractor({("wodby/demo:1-old", "/etc/demo-1.conf"): "same\n"})
+        sync_inventory = inventory("main")
+        sync_inventory["services"]["service-demo"]["manifests"]["service.yml"]["configs"][0][
+            "sourcePath"
+        ] = "/etc/demo-{{version}}.conf"
+
+        plan = plan_repository_configs(
+            "service-demo", {"planned_changes": []}, sync_inventory, generator, extractor
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.blockers, [])
+        self.assertEqual(extractor.calls[0][1], "/etc/demo-1.conf")
+
+    def test_manifest_defaults_apply_to_every_discovered_config(self) -> None:
+        generator = FakeGenerator()
+        generator.service_data[("service-demo", "service.yml")] = service_data(
+            [snapshot_config("main", "1"), snapshot_config("main-2", "2")],
+            [{"version": "1", "tag": "1-old"}, {"version": "2", "tag": "2-old"}],
+        )
+        generator.repo_files[("service-demo", "main.conf")] = "one\n"
+        generator.repo_files[("service-demo", "main-2.conf")] = "two\n"
+        extractor = FakeExtractor(
+            {
+                ("wodby/demo:1-old", "/image/default-1.conf"): "one\n",
+                ("wodby/demo:2-old", "/image/default-2.conf"): "two\n",
+            }
+        )
+        sync_inventory = {
+            "autoDiscover": True,
+            "services": {
+                "service-demo": {
+                    "manifests": {
+                        "service.yml": {
+                            "defaults": {"sourcePath": "/image/default-{{version}}.conf"}
+                        }
+                    }
+                }
+            },
+        }
+
+        plan = plan_repository_configs(
+            "service-demo", {"planned_changes": []}, sync_inventory, generator, extractor
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.eligible, 2)
+        self.assertEqual(plan.blockers, [])
+
+    def test_explicit_missing_image_config_can_be_skipped_with_reason(self) -> None:
+        generator = FakeGenerator()
+        generator.service_data[("service-demo", "service.yml")] = service_data([snapshot_config()])
+        sync_inventory = {
+            "autoDiscover": True,
+            "services": {
+                "service-demo": {
+                    "manifests": {
+                        "service.yml": {
+                            "configs": [{"name": "main", "skip": "not present in this image"}]
+                        }
+                    }
+                }
+            },
+        }
+
+        plan = plan_repository_configs(
+            "service-demo", {"planned_changes": []}, sync_inventory, generator, FakeExtractor({})
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.eligible, 0)
+        self.assertEqual(plan.blockers, [])
+        self.assertIn("not present in this image", plan.skipped[0])
+
     def test_snapshot_diff_uses_unified_context(self) -> None:
         diffs = render_planned_diffs(
             [
@@ -188,6 +372,23 @@ class ConfigSyncPlanningTest(unittest.TestCase):
         self.assertIn(" one", diffs[0])
         self.assertIn("-three", diffs[0])
         self.assertIn("+four", diffs[0])
+
+    def test_snapshot_diff_explains_trailing_newline_only_change(self) -> None:
+        diffs = render_planned_diffs(
+            [
+                {
+                    "change_type": CONFIG_CHANGE_TYPE,
+                    "file": "main.conf",
+                    "before_sha256": "before",
+                    "after_sha256": "after",
+                    "diff_before_lines": ["same"],
+                    "diff_after_lines": ["same"],
+                }
+            ]
+        )
+
+        self.assertIn("exact file content", diffs[0])
+        self.assertIn("trailing newline", diffs[0])
 
     def test_uses_planned_target_image_tag(self) -> None:
         generator = FakeGenerator()
@@ -256,7 +457,43 @@ class ConfigSyncPlanningTest(unittest.TestCase):
 
         assert plan is not None
         self.assertEqual(plan.changes, [])
-        self.assertIn("split it into version-specific", plan.blockers[0])
+        self.assertIn("add exact version overrides", plan.blockers[0])
+
+    def test_exact_variant_shadows_fallback_for_its_version(self) -> None:
+        generator = FakeGenerator()
+        fallback = snapshot_config(version=None)
+        exact = snapshot_config(version="1")
+        exact["config"] = "main.1.conf"
+        generator.service_data[("service-demo", "service.yml")] = service_data(
+            [fallback, exact],
+            [
+                {"version": "1", "tag": "1-a"},
+                {"version": "2", "tag": "2-a"},
+                {"version": "3", "tag": "3-a"},
+            ],
+        )
+        extractor = FakeExtractor(
+            {
+                ("wodby/demo:1-a", "/etc/main.conf"): "one\n",
+                ("wodby/demo:2-a", "/etc/main.conf"): "shared\n",
+                ("wodby/demo:3-a", "/etc/main.conf"): "shared\n",
+            }
+        )
+
+        plan = plan_repository_configs(
+            "service-demo",
+            {"planned_changes": []},
+            {"autoDiscover": True, "services": {}},
+            generator,
+            extractor,
+        )
+
+        assert plan is not None
+        self.assertEqual(plan.blockers, [])
+        self.assertEqual(plan.eligible, 2)
+        changes = {change["config_version"] or "default": change for change in plan.changes}
+        self.assertEqual([source["version"] for source in changes["default"]["sources"]], ["2", "3"])
+        self.assertEqual([source["version"] for source in changes["1"]["sources"]], ["1"])
 
     def test_current_snapshot_does_not_create_change(self) -> None:
         generator = FakeGenerator()
@@ -280,6 +517,14 @@ class ConfigSyncPlanningTest(unittest.TestCase):
 
 
 class DockerConfigExtractorTest(unittest.TestCase):
+    def test_command_timeout_is_reported_as_config_error(self) -> None:
+        with mock.patch(
+            "service_config_sync.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["docker", "pull"], 600),
+        ):
+            with self.assertRaisesRegex(ConfigSyncError, "docker pull timed out"):
+                run_command(["docker", "pull", "wodby/demo:1"])
+
     def test_uses_create_and_copy_without_running_image(self) -> None:
         calls: list[list[str]] = []
 
@@ -436,7 +681,9 @@ class ConfigSyncReportTest(unittest.TestCase):
 
             item = report["per_repo"][0]
             self.assertEqual(item["config_sync"]["status"], "drift")
+            self.assertEqual(len(item["config_sync"]["diffs"]), 1)
             self.assertEqual(len(item["dry_run_changes"]), 1)
+            self.assertEqual(item["dry_run_diffs"], [])
             self.assertEqual(item["planned_release"]["status"], "blocked")
 
     def test_apply_mode_adds_snapshot_to_patch_release(self) -> None:
