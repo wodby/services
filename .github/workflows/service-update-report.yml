@@ -246,7 +246,7 @@ jobs:
 
       - name: Plan Image-Derived Config Snapshots
         env:
-          CONFIG_SYNC_MODE: ${{ inputs.config_sync_mode || 'report' }}
+          CONFIG_SYNC_MODE: ${{ github.event_name == 'schedule' && 'apply' || inputs.config_sync_mode || 'report' }}
         run: |
           python scripts/service_config_sync.py \
             --report-dir "$REPORT_DIR" \
@@ -560,7 +560,7 @@ jobs:
 
       - name: Plan Image-Derived Config Snapshots
         env:
-          CONFIG_SYNC_MODE: ${{ inputs.config_sync_mode || 'report' }}
+          CONFIG_SYNC_MODE: ${{ github.event_name == 'schedule' && 'apply' || inputs.config_sync_mode || 'report' }}
         run: |
           python scripts/service_config_sync.py \
             --report-dir "$REPORT_DIR" \
