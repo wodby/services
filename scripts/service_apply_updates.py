@@ -13,7 +13,6 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
-from service_config_sync import CONFIG_CHANGE_TYPE, apply_snapshot_changes
 from service_update_report import UpdateReportGenerator, latest_stable_semver_tag, render_markdown
 
 
@@ -213,8 +212,6 @@ def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]
     changed_files: list[str] = []
     changes_by_file: dict[str, list[dict[str, Any]]] = {}
     for change in planned_changes:
-        if change.get("change_type") == CONFIG_CHANGE_TYPE:
-            continue
         manifest_path = str(change.get("file") or "service.yml")
         changes_by_file.setdefault(manifest_path, []).append(change)
 
@@ -446,7 +443,6 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
     validate_planned_release(repo_dir, release)
     validate_planned_image_tags(args.owner, planned_changes)
     changed_files = apply_manifest_changes(repo_dir, planned_changes)
-    changed_files.extend(apply_snapshot_changes(repo_dir, planned_changes))
     changed_files = list(dict.fromkeys(changed_files))
     result = commit_push_and_tag(repo_dir, args.repo, branch, release, changed_files)
     item["apply_result"] = result

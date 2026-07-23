@@ -21,16 +21,6 @@ on:
         options:
           - report
           - off
-      config_sync_mode:
-        description: Inspect or apply image-derived service config snapshots
-        required: false
-        default: report
-        type: choice
-        options:
-          - report
-          - apply
-          - off
-
 permissions:
   contents: read
 
@@ -243,17 +233,6 @@ jobs:
             --repo-filter "^${SERVICE_REPO}$" \
             --build-template-mode "${{ inputs.build_template_mode || 'report' }}" \
             --output-dir "$REPORT_DIR"
-
-      - name: Plan Image-Derived Config Snapshots
-        env:
-          CONFIG_SYNC_MODE: ${{ github.event_name == 'schedule' && 'apply' || inputs.config_sync_mode || 'report' }}
-        run: |
-          python scripts/service_config_sync.py \
-            --report-dir "$REPORT_DIR" \
-            --repo "$SERVICE_REPO" \
-            --owner wodby \
-            --inventory config-sync.yml \
-            --mode "$CONFIG_SYNC_MODE"
 
       - name: Determine Apply Scope
         id: apply-scope
@@ -557,17 +536,6 @@ jobs:
             --repo-filter "^${SERVICE_REPO}$" \
             --build-template-mode "${{ inputs.build_template_mode || 'report' }}" \
             --output-dir "$REPORT_DIR"
-
-      - name: Plan Image-Derived Config Snapshots
-        env:
-          CONFIG_SYNC_MODE: ${{ github.event_name == 'schedule' && 'apply' || inputs.config_sync_mode || 'report' }}
-        run: |
-          python scripts/service_config_sync.py \
-            --report-dir "$REPORT_DIR" \
-            --repo "$SERVICE_REPO" \
-            --owner wodby \
-            --inventory config-sync.yml \
-            --mode "$CONFIG_SYNC_MODE"
 
       - name: Determine Apply Scope
         id: apply-scope

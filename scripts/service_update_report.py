@@ -634,20 +634,6 @@ def human_change_description(change: dict[str, Any]) -> str:
     if change_type == "image_tag":
         version = str(change.get("image_version") or "unknown")
         return f"{prefix}Tag updated from `{before}` to `{after}` for version `{version}`."
-    if change_type == "config_snapshot":
-        config_name = str(change.get("config_name") or "config")
-        config_version = str(change.get("config_version") or "").strip()
-        version_suffix = f" for version `{config_version}`" if config_version else ""
-        output_file = str(change.get("file") or "config snapshot")
-        sources = change.get("sources") or []
-        source = sources[0] if sources and isinstance(sources[0], dict) else {}
-        image = str(source.get("image") or "image")
-        digest = str(source.get("image_digest") or "")
-        digest_suffix = f" (`{digest}`)" if digest else ""
-        return (
-            f"{prefix}Config `{config_name}`{version_suffix} refreshed in `{output_file}` "
-            f"from `{image}`{digest_suffix}."
-        )
     if change_type == "helm_chart":
         chart = str(change.get("helm_chart") or "chart")
         return f"{prefix}Helm chart `{chart}` updated from `{before}` to `{after}`."
@@ -2928,47 +2914,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Repos updated by workflow: {report['totals'].get('applied_updates', 0)}")
     if "apply_failures" in report["totals"]:
         lines.append(f"- Repos with update apply failures: {report['totals'].get('apply_failures', 0)}")
-    if "config_sync_eligible" in report["totals"]:
-        lines.append(f"- Image-backed configs checked: {report['totals'].get('config_sync_eligible', 0)}")
-        lines.append(f"- Repos with current config snapshots: {report['totals'].get('config_sync_current', 0)}")
-        lines.append(f"- Repos with config snapshot drift: {report['totals'].get('config_sync_drift', 0)}")
-        lines.append(f"- Repos with blocked config checks: {report['totals'].get('config_sync_blocked', 0)}")
-        lines.append(f"- Repos with failed config checks: {report['totals'].get('config_sync_failed', 0)}")
-        lines.append(f"- Configs deliberately skipped: {report['totals'].get('config_sync_skipped', 0)}")
     lines.append("")
-
-    config_sync_items = [
-        (item, item.get("config_sync") or {})
-        for item in sorted(report["per_repo"], key=lambda value: value["repo"])
-        if int((item.get("config_sync") or {}).get("eligible") or 0) > 0
-        or (item.get("config_sync") or {}).get("status") in ("blocked", "failed")
-        or bool((item.get("config_sync") or {}).get("skipped"))
-    ]
-    if config_sync_items:
-        lines.append("## Config Synchronization")
-        lines.append("")
-        lines.append(
-            "Image-derived editable defaults are reported separately from service manifest and release changes."
-        )
-        lines.append("")
-        for item, result in config_sync_items:
-            lines.append(f"### {item['repo']}")
-            lines.append(f"- Status: `{result.get('status', 'unknown')}`")
-            lines.append(f"- Mode: `{result.get('mode', 'unknown')}`")
-            lines.append(f"- Eligible configs: {int(result.get('eligible') or 0)}")
-            lines.append(f"- Changed snapshots: {int(result.get('changes') or 0)}")
-            for blocker in result.get("blockers") or []:
-                lines.append(f"- Blocker: {blocker}")
-            if result.get("reason"):
-                lines.append(f"- Failure: {result['reason']}")
-            for skipped in result.get("skipped") or []:
-                lines.append(f"- Skipped: {skipped}")
-            lines.append("")
-            for config_diff in result.get("diffs") or []:
-                lines.append("```diff")
-                lines.extend(str(config_diff).splitlines())
-                lines.append("```")
-                lines.append("")
 
     planned_change_items = [
         item
