@@ -13,6 +13,10 @@ from service_update_report import (  # noqa: E402
     render_markdown,
     render_tag_note_details,
 )
+from update_repository_readmes import (  # noqa: E402
+    build_boilerplates,
+    preserved_custom_use_sections,
+)
 
 
 class FakeGenerator(UpdateReportGenerator):
@@ -51,7 +55,42 @@ class FakeGenerator(UpdateReportGenerator):
         return copy.deepcopy(data) if data is not None else None
 
 
-class BuildTemplateReportTest(unittest.TestCase):
+class BuildBoilerplateReportTest(unittest.TestCase):
+    def test_readme_generator_supports_canonical_and_legacy_fields(self) -> None:
+        canonical = [{"name": "canonical"}]
+        legacy = [{"name": "legacy"}]
+
+        self.assertEqual(
+            build_boilerplates({"build": {"boilerplates": canonical}}),
+            canonical,
+        )
+        self.assertEqual(
+            build_boilerplates({"build": {"templates": legacy}}),
+            legacy,
+        )
+        with self.assertRaisesRegex(RuntimeError, "cannot define both"):
+            build_boilerplates(
+                {"build": {"boilerplates": [], "templates": []}}
+            )
+
+    def test_readme_generator_preserves_custom_use_sections(self) -> None:
+        readme = """\
+## Use this service
+
+Generated usage guidance.
+
+## Background jobs
+
+Keep this repository-specific guidance.
+
+## Maintain a custom version
+"""
+
+        self.assertEqual(
+            preserved_custom_use_sections(readme),
+            "## Background jobs\n\nKeep this repository-specific guidance.",
+        )
+
     def test_nginx_proxy_uses_nginx_eol_data(self) -> None:
         generator = FakeGenerator()
         generator._eol_product_index_cache = {"nginx": "nginx"}
@@ -61,18 +100,18 @@ class BuildTemplateReportTest(unittest.TestCase):
             "nginx",
         )
 
-    def test_build_template_branch_and_dockerfile_are_current(self) -> None:
+    def test_build_boilerplate_branch_and_dockerfile_are_current(self) -> None:
         generator = FakeGenerator()
         generator.repo_files[("service-node", "Dockerfile")] = "FROM node\n"
         generator.refs.add(("wodby", "expressjs-boilerplate", "heads/main"))
 
-        result = generator.check_build_templates(
+        result = generator.check_build_boilerplates(
             "service-node",
             "service.yml",
             {
                 "build": {
                     "dockerfile": "Dockerfile",
-                    "templates": [
+                    "boilerplates": [
                         {
                             "name": "expressjs",
                             "repo": "https://github.com/wodby/expressjs-boilerplate",
@@ -88,20 +127,65 @@ class BuildTemplateReportTest(unittest.TestCase):
         self.assertEqual(result["warnings"], [])
         self.assertIn("`build.dockerfile` file `Dockerfile` exists", result["current"])
         self.assertIn(
-            "build template `expressjs` branch `main` exists in `https://github.com/wodby/expressjs-boilerplate`",
+            "build boilerplate `expressjs` branch `main` exists in `https://github.com/wodby/expressjs-boilerplate`",
             result["current"],
+        )
+
+    def test_legacy_build_templates_are_still_checked(self) -> None:
+        generator = FakeGenerator()
+        generator.refs.add(("wodby", "expressjs-boilerplate", "heads/main"))
+
+        result = generator.check_build_boilerplates(
+            "service-node",
+            "service.yml",
+            {
+                "build": {
+                    "templates": [
+                        {
+                            "name": "expressjs",
+                            "repo": "https://github.com/wodby/expressjs-boilerplate",
+                            "branch": "main",
+                        }
+                    ],
+                }
+            },
+            "",
+        )
+
+        self.assertEqual(result["warnings"], [])
+        self.assertIn(
+            "build boilerplate `expressjs` branch `main` exists in `https://github.com/wodby/expressjs-boilerplate`",
+            result["current"],
+        )
+
+    def test_rejects_canonical_and_legacy_build_fields_together(self) -> None:
+        generator = FakeGenerator()
+
+        result = generator.check_build_boilerplates(
+            "service-node",
+            "service.yml",
+            {"build": {"boilerplates": [], "templates": []}},
+            "",
+        )
+
+        self.assertEqual(
+            result["warnings"],
+            [
+                'service build cannot define both "boilerplates" '
+                'and legacy "templates"'
+            ],
         )
 
     def test_tag_constraint_reports_new_major_and_missing_pipeline(self) -> None:
         generator = FakeGenerator()
         generator.tags[("laravel", "laravel")] = {"v11.0.0", "v11.6.1", "v13.8.0"}
 
-        result = generator.check_build_templates(
+        result = generator.check_build_boilerplates(
             "service-laravel-php",
             "service.yml",
             {
                 "build": {
-                    "templates": [
+                    "boilerplates": [
                         {
                             "name": "boilerplate",
                             "repo": "https://github.com/laravel/laravel",
@@ -117,27 +201,27 @@ class BuildTemplateReportTest(unittest.TestCase):
         self.assertEqual(
             result["updates"],
             [
-                "new major build template tag `v13.8.0` is available for `boilerplate` "
+                "new major build boilerplate tag `v13.8.0` is available for `boilerplate` "
                 "outside constraint `^11`; manual review required"
             ],
         )
         self.assertEqual(
             result["warnings"],
-            ["build template `boilerplate` pipeline `pipeline.yml` was not found at `v11.6.1`"],
+            ["build boilerplate `boilerplate` pipeline `pipeline.yml` was not found at `v11.6.1`"],
         )
-        self.assertIn("build template `boilerplate` tag constraint `^11` resolves to `v11.6.1`", result["current"])
+        self.assertIn("build boilerplate `boilerplate` tag constraint `^11` resolves to `v11.6.1`", result["current"])
 
-    def test_markdown_includes_build_template_review_section(self) -> None:
-        report = sample_build_template_report()
+    def test_markdown_includes_build_boilerplate_review_section(self) -> None:
+        report = sample_build_boilerplate_report()
 
         markdown = render_markdown(report)
 
-        self.assertIn("## Build Template Review", markdown)
-        self.assertIn("new build template tag", markdown)
+        self.assertIn("## Build Boilerplate Review", markdown)
+        self.assertIn("new build boilerplate tag", markdown)
         self.assertNotIn("boilerplate file drift", markdown)
 
-    def test_email_body_includes_build_template_review_section(self) -> None:
-        reports = [sample_build_template_report()]
+    def test_email_body_includes_build_boilerplate_review_section(self) -> None:
+        reports = [sample_build_boilerplate_report()]
         items = repo_items(reports)
         counts = event_counts(reports, items, "success", "success")
 
@@ -152,9 +236,9 @@ class BuildTemplateReportTest(unittest.TestCase):
             artifact_result="success",
         )
 
-        self.assertEqual(counts["build_template_review_items"], 1)
-        self.assertIn("Build Template Review", body)
-        self.assertIn("new build template tag", body)
+        self.assertEqual(counts["build_boilerplate_review_items"], 1)
+        self.assertIn("Build Boilerplate Review", body)
+        self.assertIn("new build boilerplate tag", body)
 
     def test_parent_service_change_notes_include_ancestor_services(self) -> None:
         generator = FakeGenerator()
@@ -227,7 +311,7 @@ class BuildTemplateReportTest(unittest.TestCase):
         self.assertIn("inheritance cycle", cycle_note["message"])
 
 
-def sample_build_template_report() -> dict:
+def sample_build_boilerplate_report() -> dict:
     return {
         "generated_at": "2026-07-07T00:00:00+00:00",
         "totals": {
@@ -245,8 +329,8 @@ def sample_build_template_report() -> dict:
             "planned_releases": 0,
             "dry_run_updates": 0,
             "release_blockers": 0,
-            "build_template_review_items": 1,
-            "build_template_warnings": 0,
+            "build_boilerplate_review_items": 1,
+            "build_boilerplate_warnings": 0,
         },
         "per_repo": [
             {
@@ -266,8 +350,8 @@ def sample_build_template_report() -> dict:
                 "has_image": True,
                 "has_helm": True,
                 "has_options": True,
-                "build_template_review_items": ["new build template tag `v2.0.0` is available"],
-                "build_template_warnings": [],
+                "build_boilerplate_review_items": ["new build boilerplate tag `v2.0.0` is available"],
+                "build_boilerplate_warnings": [],
             }
         ],
         "no_changes": {},
@@ -280,8 +364,8 @@ def sample_build_template_report() -> dict:
                 "has_image": True,
                 "has_helm": True,
                 "has_options": True,
-                "build_template_review_items": ["new build template tag `v2.0.0` is available"],
-                "build_template_warnings": [],
+                "build_boilerplate_review_items": ["new build boilerplate tag `v2.0.0` is available"],
+                "build_boilerplate_warnings": [],
                 "current": [],
                 "warnings": [],
             }

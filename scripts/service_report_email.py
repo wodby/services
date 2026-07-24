@@ -98,8 +98,8 @@ def event_counts(
         "release_blockers": sum(
             1 for item in items if (item.get("planned_release") or {}).get("status") == "blocked"
         ),
-        "build_template_review_items": sum(1 for item in items if item.get("build_template_review_items")),
-        "build_template_warnings": sum(1 for item in items if item.get("build_template_warnings")),
+        "build_boilerplate_review_items": sum(1 for item in items if item.get("build_boilerplate_review_items")),
+        "build_boilerplate_warnings": sum(1 for item in items if item.get("build_boilerplate_warnings")),
         "applied_updates": sum(
             1
             for item in items
@@ -211,22 +211,22 @@ def append_repo_dry_run_changes(lines: list[str], items: list[dict[str, Any]]) -
         lines.append("")
 
 
-def append_repo_build_template_review(lines: list[str], items: list[dict[str, Any]]) -> None:
+def append_repo_build_boilerplate_review(lines: list[str], items: list[dict[str, Any]]) -> None:
     selected = [
         (
             item,
-            item.get("build_template_review_items") or [],
-            item.get("build_template_warnings") or [],
+            item.get("build_boilerplate_review_items") or [],
+            item.get("build_boilerplate_warnings") or [],
         )
         for item in items
-        if item.get("build_template_review_items") or item.get("build_template_warnings")
+        if item.get("build_boilerplate_review_items") or item.get("build_boilerplate_warnings")
     ]
     if not selected:
         return
 
-    lines.append("Build Template Review")
+    lines.append("Build Boilerplate Review")
     lines.append("")
-    lines.append("These checks are report only. The workflow does not apply build template changes.")
+    lines.append("These checks are report only. The workflow does not apply build boilerplate changes.")
     lines.append("")
     for item, updates, warnings in selected:
         lines.append(f"{item['repo']}:")
@@ -306,7 +306,7 @@ def build_body(
 
     append_repo_planned_changes(lines, items)
     append_repo_dry_run_changes(lines, items)
-    append_repo_build_template_review(lines, items)
+    append_repo_build_boilerplate_review(lines, items)
     append_repo_apply_results(lines, items)
     append_repo_messages(lines, "Updates Without Local Manifest Diff", items, "updates_without_local_diff")
     append_grouped_notifications(lines, items)
@@ -536,24 +536,24 @@ def html_dry_run_changes(items: list[dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
-def html_build_template_review(items: list[dict[str, Any]]) -> str:
+def html_build_boilerplate_review(items: list[dict[str, Any]]) -> str:
     selected = [
         (
             item,
-            item.get("build_template_review_items") or [],
-            item.get("build_template_warnings") or [],
+            item.get("build_boilerplate_review_items") or [],
+            item.get("build_boilerplate_warnings") or [],
         )
         for item in items
-        if item.get("build_template_review_items") or item.get("build_template_warnings")
+        if item.get("build_boilerplate_review_items") or item.get("build_boilerplate_warnings")
     ]
     if not selected:
         return ""
 
     blocks = [
         "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
-        "Build Template Review</h2>",
+        "Build Boilerplate Review</h2>",
         "<p style=\"margin:0 0 12px 0;color:#4b5563;\">"
-        "These checks are report only. The workflow does not apply build template changes.</p>",
+        "These checks are report only. The workflow does not apply build boilerplate changes.</p>",
     ]
     for item, updates, warnings in selected:
         blocks.append(
@@ -667,7 +667,7 @@ def build_html_body(
         )
     body.append(html_planned_changes(items))
     body.append(html_dry_run_changes(items))
-    body.append(html_build_template_review(items))
+    body.append(html_build_boilerplate_review(items))
     body.append(html_apply_results(items))
     body.append(html_repo_messages("Updates Without Local Manifest Diff", items, "updates_without_local_diff"))
     body.append(html_grouped_notifications(items))
@@ -683,7 +683,7 @@ def build_subject(counts: dict[str, int], workflow_result: str, sha: str) -> str
         f"[services] report {status}: "
         f"{counts['updates']} update repos, "
         f"{counts['dry_run_updates']} dry-run repos, "
-        f"{counts['build_template_review_items']} build-template repos, "
+        f"{counts['build_boilerplate_review_items']} build-boilerplate repos, "
         f"{counts['major_version_notifications']} major-version repos, "
         f"{counts['helm_major_version_notifications']} Helm-major repos ({short_sha})"
     )

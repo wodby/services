@@ -2,7 +2,7 @@
 """Render README files for the public Wodby service repositories.
 
 The aggregate README is the repository inventory. Service manifests remain the
-source of truth for service type, capabilities, build templates, and the stack
+source of truth for service type, capabilities, build boilerplates, and the stack
 references used for cross-links.
 """
 
@@ -130,10 +130,10 @@ def service_summary(repo_name: str, display_name: str, manifests: list[dict[str,
 
     types = {str(manifest.get("type", "service")) for manifest in manifests}
     has_build = any(manifest.get("build", {}).get("connect") for manifest in manifests)
-    has_templates = any(manifest.get("build", {}).get("templates") for manifest in manifests)
+    has_boilerplates = any(build_boilerplates(manifest) for manifest in manifests)
     external = any(manifest.get("external") for manifest in manifests)
 
-    if has_build or has_templates:
+    if has_build or has_boilerplates:
         return f"Build and run {display_name} applications on Kubernetes with Wodby."
     if external:
         return (
@@ -175,20 +175,33 @@ def wrapped(value: str) -> str:
     return result
 
 
-def template_entries(manifests: list[dict[str, Any]]) -> list[dict[str, str]]:
-    templates: list[dict[str, str]] = []
+def build_boilerplates(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    build = manifest.get("build") or {}
+    boilerplates = build.get("boilerplates")
+    templates = build.get("templates")
+    if boilerplates is not None and templates is not None:
+        raise RuntimeError('service build cannot define both "boilerplates" and legacy "templates"')
+    value = boilerplates if boilerplates is not None else templates
+    return value if isinstance(value, list) else []
+
+
+def boilerplate_entries(manifests: list[dict[str, Any]]) -> list[dict[str, str]]:
+    boilerplates: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for manifest in manifests:
-        build = manifest.get("build") or {}
-        for template in build.get("templates") or []:
-            repo = str(template.get("repo", "")).strip()
-            title = str(template.get("title") or template.get("name") or "Starter template").strip()
+        for boilerplate in build_boilerplates(manifest):
+            repo = str(boilerplate.get("repo", "")).strip()
+            title = str(
+                boilerplate.get("title")
+                or boilerplate.get("name")
+                or "Starter boilerplate"
+            ).strip()
             key = (title, repo)
             if not repo or key in seen:
                 continue
             seen.add(key)
-            templates.append({"title": title, "repo": repo})
-    return templates
+            boilerplates.append({"title": title, "repo": repo})
+    return boilerplates
 
 
 def service_name_index(service_repositories: list[str]) -> dict[str, str]:
@@ -301,11 +314,14 @@ def format_build(manifest: dict[str, Any]) -> str:
         values.append("Git source connection enabled")
     if build.get("dockerfile"):
         values.append(f"Dockerfile: `{build['dockerfile']}`")
-    templates = template_entries([manifest])
-    if templates:
+    boilerplates = boilerplate_entries([manifest])
+    if boilerplates:
         values.append(
-            "starters: "
-            + ", ".join(f"[{entry['title']}]({entry['repo']})" for entry in templates)
+            "boilerplates: "
+            + ", ".join(
+                f"[{entry['title']}]({entry['repo']})"
+                for entry in boilerplates
+            )
         )
     return "; ".join(values) if values else "Build configuration provided"
 
@@ -385,6 +401,22 @@ def preserved_overview(readme: str) -> str | None:
     return readme[start.start() : start.end() + end.start()].strip()
 
 
+def preserved_custom_use_sections(readme: str) -> str | None:
+    use = re.search(r"^## Use this service\s*$", readme, re.MULTILINE)
+    if not use:
+        return None
+    maintain = re.search(
+        r"^## Maintain a custom version\s*$",
+        readme[use.end() :],
+        re.MULTILINE,
+    )
+    if not maintain:
+        return None
+    block = readme[use.end() : use.end() + maintain.start()]
+    custom = re.search(r"^## .+\s*$", block, re.MULTILINE)
+    return block[custom.start() :].strip() if custom else None
+
+
 def validation_commands(repo_dir: Path, manifest_paths: list[Path]) -> str:
     return "\n".join(
         f"wodby service validate-manifest {path.relative_to(repo_dir).as_posix()} --org <org-id>"
@@ -404,9 +436,10 @@ def render_service_readme(repo_name: str) -> tuple[str, bool, str]:
     display_name = repository_display_name(repo_name, manifests, old_readme)
     summary = service_summary(repo_name, display_name, manifests)
     names = {str(manifest.get("name", "")).strip() for manifest in manifests}
-    templates = template_entries(manifests)
+    boilerplates = boilerplate_entries(manifests)
     stacks = related_stacks(names)
     overview = preserved_overview(old_readme) or generated_overview(repo_dir, manifests, manifest_paths)
+    custom_use_sections = preserved_custom_use_sections(old_readme)
 
     title = (
         f"# {display_name} Kubernetes system service for Wodby"
@@ -432,17 +465,19 @@ def render_service_readme(repo_name: str) -> tuple[str, bool, str]:
         "- [Service manifest reference](https://wodby.com/docs/2.0/services/template/)",
     ]
 
-    if templates and not infrastructure:
-        lines.extend(["", "## Start with a template", ""])
+    if boilerplates and not infrastructure:
+        lines.extend(["", "## Start with a boilerplate", ""])
         lines.append(
             wrapped(
-                "Use one of the source templates exposed by this service to start "
+                "Use one of the boilerplates exposed by this service to start "
                 "with compatible build configuration and Wodby CI:"
             )
         )
         lines.append("")
-        for template in templates:
-            lines.append(f"- [{template['title']}]({template['repo']})")
+        for boilerplate in boilerplates:
+            lines.append(
+                f"- [{boilerplate['title']}]({boilerplate['repo']})"
+            )
 
     if stacks:
         heading = (
@@ -515,6 +550,12 @@ def render_service_readme(repo_name: str) -> tuple[str, bool, str]:
                     "The stack defines its links, settings, versions, resources, and "
                     "relationship to the rest of the application."
                 ),
+            ]
+        )
+        if custom_use_sections:
+            lines.extend(["", custom_use_sections])
+        lines.extend(
+            [
                 "",
                 "## Maintain a custom version",
                 "",
