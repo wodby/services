@@ -698,6 +698,11 @@ def render_tag_note_details(note: dict[str, Any], indent: int = 0) -> list[str]:
             lines.append(f"{prefix}{message_line}")
     for child in note.get("base_changes") or []:
         lines.extend(render_tag_note(child, indent))
+    parent_changes = note.get("parent_changes") or []
+    if parent_changes:
+        lines.append(f"{prefix}Parent service changes:")
+        for child in parent_changes:
+            lines.extend(render_tag_note(child, indent + 1))
     return lines
 
 
@@ -1425,7 +1430,7 @@ class UpdateReportGenerator:
             f"(constraint: `{current_constraint}`)"
         )
         try:
-            parent_change_notes = [self.build_wodby_tag_note_tree(parent_repo, latest_tag, None)]
+            parent_change_notes = [self.build_service_tag_note_tree(parent_repo, latest_tag)]
         except Exception as exc:
             parent_change_notes = [
                 {
@@ -1596,6 +1601,44 @@ class UpdateReportGenerator:
                 match.group("tag"),
                 None,
                 depth=depth + 1,
+                seen=seen | {key},
+            )
+        ]
+        return note
+
+    def build_service_tag_note_tree(
+        self,
+        repo: str,
+        tag: str,
+        *,
+        seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> dict[str, Any]:
+        key = (repo, tag)
+        if key in seen:
+            return {
+                "repo": f"{self.owner}/{repo}",
+                "tag": tag,
+                "message": "Parent service traversal stopped because an inheritance cycle was detected.",
+                "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{tag}",
+                "base_changes": [],
+                "parent_changes": [],
+            }
+
+        note = self.build_wodby_tag_note_tree(repo, tag, None)
+        service_data = self.get_service_data_at_ref(repo, tag)
+        if service_data is None:
+            return note
+
+        parent_name = str(service_data.get("from") or "").strip()
+        parent_tag = str(service_data.get("fromVersion") or "").strip()
+        if not parent_name or not parent_tag:
+            return note
+
+        parent_repo = self.service_name_to_repo(parent_name)
+        note["parent_changes"] = [
+            self.build_service_tag_note_tree(
+                parent_repo,
+                parent_tag,
                 seen=seen | {key},
             )
         ]
