@@ -24,9 +24,9 @@ from update_repository_readmes import (
 
 
 def github_environment() -> dict[str, str]:
-    token = os.environ.get("WODBY_GITHUB_TOKEN", "").strip()
+    token = os.environ.get("WODBOT_GITHUB_PAT", "").strip()
     if not token:
-        raise RuntimeError("WODBY_GITHUB_TOKEN is required")
+        raise RuntimeError("WODBOT_GITHUB_PAT is required")
     env = os.environ.copy()
     env["GH_TOKEN"] = token
     return env

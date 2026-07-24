@@ -313,8 +313,8 @@ def validate_planned_image_tags(
 
 
 def configure_git_identity(repo_dir: Path) -> None:
-    name = os.environ.get("GIT_AUTHOR_NAME") or os.environ.get("GIT_COMMITTER_NAME")
-    email = os.environ.get("GIT_AUTHOR_EMAIL") or os.environ.get("GIT_COMMITTER_EMAIL")
+    name = os.environ.get("WODBOT_GIT_NAME")
+    email = os.environ.get("WODBOT_GIT_EMAIL")
 
     if name:
         run_git(repo_dir, "config", "user.name", name)
@@ -326,7 +326,7 @@ def configure_git_identity(repo_dir: Path) -> None:
     if not configured_name or not configured_email:
         raise RuntimeError(
             "git user.name and user.email must be configured, or provided with "
-            "GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL"
+            "WODBOT_GIT_NAME/WODBOT_GIT_EMAIL"
         )
 
 

@@ -888,7 +888,6 @@ class UpdateReportGenerator:
         self.github_headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
         token = (
             os.environ.get("WODBOT_GITHUB_PAT")
-            or os.environ.get("WODBY_GITHUB_TOKEN")
             or os.environ.get("GITHUB_TOKEN")
             or os.environ.get("GH_TOKEN")
         )
