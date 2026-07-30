@@ -176,8 +176,9 @@ Keep this repository-specific guidance.
             ],
         )
 
-    def test_tag_constraint_reports_new_major_and_missing_pipeline(self) -> None:
+    def test_tag_constraint_reports_new_major_and_service_pipeline(self) -> None:
         generator = FakeGenerator()
+        generator.repo_files[("service-laravel-php", "pipeline.yml")] = "version: 0.1\n"
         generator.tags[("laravel", "laravel")] = {"v11.0.0", "v11.6.1", "v13.8.0"}
 
         result = generator.check_build_boilerplates(
@@ -205,11 +206,44 @@ Keep this repository-specific guidance.
                 "outside constraint `^11`; manual review required"
             ],
         )
-        self.assertEqual(
-            result["warnings"],
-            ["build boilerplate `boilerplate` pipeline `pipeline.yml` was not found at `v11.6.1`"],
+        self.assertEqual(result["warnings"], [])
+        self.assertIn(
+            "build boilerplate `boilerplate` pipeline file `pipeline.yml` exists",
+            result["current"],
         )
         self.assertIn("build boilerplate `boilerplate` tag constraint `^11` resolves to `v11.6.1`", result["current"])
+
+    def test_missing_service_pipeline_does_not_make_tag_resolution_a_warning(self) -> None:
+        generator = FakeGenerator()
+        generator.tags[("laravel", "laravel")] = {"v11.6.1"}
+
+        result = generator.check_build_boilerplates(
+            "service-laravel-php",
+            "service.yml",
+            {
+                "build": {
+                    "boilerplates": [
+                        {
+                            "name": "boilerplate",
+                            "repo": "https://github.com/laravel/laravel",
+                            "tag": "^11",
+                            "pipeline": "pipeline.yml",
+                        }
+                    ],
+                }
+            },
+            "",
+        )
+
+        self.assertEqual(result["updates"], [])
+        self.assertEqual(
+            result["warnings"],
+            ["build boilerplate `boilerplate` pipeline references missing file `pipeline.yml`"],
+        )
+        self.assertEqual(
+            result["current"],
+            ["build boilerplate `boilerplate` tag constraint `^11` resolves to `v11.6.1`"],
+        )
 
     def test_markdown_includes_build_boilerplate_review_section(self) -> None:
         report = sample_build_boilerplate_report()

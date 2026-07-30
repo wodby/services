@@ -1102,6 +1102,7 @@ class UpdateReportGenerator:
 
     def check_build_boilerplate_entry(
         self,
+        repo: str,
         boilerplate: dict[str, Any],
         manifest_path: str,
         prefix: str,
@@ -1132,15 +1133,14 @@ class UpdateReportGenerator:
             message = f"{prefix}build boilerplate `{name}` defines both `branch` and `tag`; manual review required"
             return {**check, "status": "warning", "message": message}
 
-        ref_for_pipeline: str | None = None
         messages: list[str] = []
+        warning_messages: list[str] = []
         status = "current"
 
         if branch:
             check.update({"ref_type": "branch", "ref": branch})
             if self.github_ref_exists(boilerplate_owner, boilerplate_repo, f"heads/{branch}"):
                 messages.append(f"{prefix}build boilerplate `{name}` branch `{branch}` exists in `{repo_url}`")
-                ref_for_pipeline = branch
             else:
                 message = f"{prefix}build boilerplate `{name}` branch `{branch}` was not found in `{repo_url}`"
                 return {**check, "status": "missing", "message": message}
@@ -1165,7 +1165,6 @@ class UpdateReportGenerator:
                     f"{prefix}build boilerplate `{name}` tag constraint `{tag}` resolves to `{latest_tag}`"
                 )
                 check.update({"resolved_tag": latest_tag})
-                ref_for_pipeline = latest_tag
                 if latest_overall and latest_overall[1].major > latest_version.major:
                     overall_tag, _overall_version = latest_overall
                     messages.append(
@@ -1186,7 +1185,6 @@ class UpdateReportGenerator:
                     f"{prefix}build boilerplate `{name}` tag constraint `{tag}` resolves to `{latest_tag}`"
                 )
                 check.update({"resolved_tag": latest_tag})
-                ref_for_pipeline = latest_tag
                 if latest_overall and latest_overall[1] >= caret_upper_bound(caret_base):
                     overall_tag, _overall_version = latest_overall
                     messages.append(
@@ -1200,7 +1198,6 @@ class UpdateReportGenerator:
                     message = f"{prefix}build boilerplate `{name}` tag `{tag}` was not found in `{repo_url}`"
                     return {**check, "status": "missing", "message": message}
                 messages.append(f"{prefix}build boilerplate `{name}` tag `{tag}` exists in `{repo_url}`")
-                ref_for_pipeline = tag
                 if parsed_current is not None and latest_overall and latest_overall[1] > parsed_current:
                     latest_tag, latest_version = latest_overall
                     if latest_version.major > parsed_current.major:
@@ -1219,24 +1216,27 @@ class UpdateReportGenerator:
             return {**check, "status": "warning", "message": message}
 
         if pipeline:
-            check["pipeline"] = pipeline
-            if ref_for_pipeline is None:
-                messages.append(
-                    f"{prefix}build boilerplate `{name}` pipeline `{pipeline}` could not be checked without a resolved ref"
+            pipeline_path = manifest_relative_path(manifest_path, pipeline)
+            check.update({"pipeline": pipeline, "pipeline_file": pipeline_path})
+            if self.get_repo_file(repo, pipeline_path) is None:
+                message = (
+                    f"{prefix}build boilerplate `{name}` pipeline references missing file `{pipeline_path}`"
                 )
-                if status == "current":
-                    status = "warning"
-            elif self.get_github_file(boilerplate_owner, boilerplate_repo, pipeline, ref_for_pipeline) is None:
-                messages.append(
-                    f"{prefix}build boilerplate `{name}` pipeline `{pipeline}` was not found at `{ref_for_pipeline}`"
-                )
+                messages.append(message)
+                warning_messages.append(message)
                 status = "warning" if status == "current" else status
             else:
                 messages.append(
-                    f"{prefix}build boilerplate `{name}` pipeline `{pipeline}` exists at `{ref_for_pipeline}`"
+                    f"{prefix}build boilerplate `{name}` pipeline file `{pipeline_path}` exists"
                 )
 
-        return {**check, "status": status, "messages": messages, "message": messages[-1] if messages else ""}
+        return {
+            **check,
+            "status": status,
+            "messages": messages,
+            "warning_messages": warning_messages,
+            "message": messages[-1] if messages else "",
+        }
 
     def check_build_boilerplates(
         self,
@@ -1312,18 +1312,14 @@ class UpdateReportGenerator:
                     }
                 )
                 continue
-            check = self.check_build_boilerplate_entry(boilerplate, manifest_path, prefix)
+            check = self.check_build_boilerplate_entry(repo, boilerplate, manifest_path, prefix)
             result["checks"].append(check)
             messages = check.get("messages") or [check.get("message")]
             messages = [str(message) for message in messages if message]
             if check["status"] == "current":
                 result["current"].extend(messages)
             elif check["status"] == "update_available":
-                warning_messages = [
-                    message
-                    for message in messages
-                    if " was not found " in message or "could not be checked" in message
-                ]
+                warning_messages = [str(message) for message in check.get("warning_messages") or []]
                 current_messages = [
                     message
                     for message in messages
@@ -1332,6 +1328,10 @@ class UpdateReportGenerator:
                 update_messages = [message for message in messages if "manual review required" in message]
                 result["current"].extend(current_messages)
                 result["updates"].extend(update_messages or messages)
+                result["warnings"].extend(warning_messages)
+            elif check.get("warning_messages"):
+                warning_messages = [str(message) for message in check["warning_messages"]]
+                result["current"].extend(message for message in messages if message not in warning_messages)
                 result["warnings"].extend(warning_messages)
             else:
                 result["warnings"].extend(messages)
