@@ -629,32 +629,62 @@ def label_prefix(change: dict[str, Any]) -> str:
     return f"{label}: " if label else ""
 
 
-def human_change_description(change: dict[str, Any]) -> str:
-    before = format_diff_value(change.get("display_before", change.get("before")))
-    after = format_diff_value(change.get("display_after", change.get("after")))
-    prefix = label_prefix(change)
-    change_type = change.get("change_type")
-
-    if change_type == "image_tag":
+def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[str]:
+    """Summarize manifest-only updates without repeating customer-facing changes."""
+    lines: list[str] = []
+    image_groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for change in planned_changes:
+        if change.get("change_type") != "image_tag":
+            continue
+        key = (
+            str(change.get("service_label") or "").strip(),
+            str(change.get("image") or "image"),
+        )
+        target = format_diff_value(change.get("after"))
         version = str(change.get("image_version") or "unknown")
-        return f"{prefix}Tag updated from `{before}` to `{after}` for version `{version}`."
-    if change_type == "helm_chart":
-        chart = str(change.get("helm_chart") or "chart")
-        return f"{prefix}Helm chart `{chart}` updated from `{before}` to `{after}`."
-    if change_type == "crd_helm_chart":
-        chart = str(change.get("crd_chart") or change.get("helm_chart") or "CRD chart")
-        return f"{prefix}CRD Helm chart `{chart}` updated from `{before}` to `{after}`."
-    if change_type == "eol":
-        product = str(change.get("product_label") or "").strip()
-        version = str(change.get("version") or "unknown")
-        product_suffix = f" for {product}" if product else ""
-        return f"{prefix}EOL updated to `{after}`{product_suffix} version `{version}`."
-    if change_type == "parent_service_version":
-        parent_repo = str(change.get("parent_repo") or "parent service")
-        return f"{prefix}Parent service `{parent_repo}` updated from `{before}` to `{after}`."
+        image_groups.setdefault(key, {}).setdefault(target, []).append(version)
 
-    field_path = str(change.get("path") or change.get("key") or "value")
-    return f"{prefix}`{field_path}` updated from `{before}` to `{after}`."
+    for (service_label, image), targets in image_groups.items():
+        prefix = f"{service_label}: " if service_label else ""
+        target_parts: list[str] = []
+        version_count = 0
+        for target, versions in targets.items():
+            version_count += len(versions)
+            formatted_versions = ", ".join(f"`{version}`" for version in versions)
+            target_parts.append(f"`{target}` for {formatted_versions}")
+        if len(targets) == 1:
+            target, versions = next(iter(targets.items()))
+            action = "image tag updated to" if version_count == 1 else "image tags updated to"
+            formatted_versions = ", ".join(f"`{version}`" for version in versions)
+            version_label = "" if version_count == 1 else "versions "
+            lines.append(f"{prefix}{image} {action} `{target}` for {version_label}{formatted_versions}")
+        else:
+            lines.append(f"{prefix}{image} image tags updated: {'; '.join(target_parts)}")
+
+    for change in planned_changes:
+        change_type = change.get("change_type")
+        if change_type == "image_tag":
+            continue
+        after = format_diff_value(change.get("display_after", change.get("after")))
+        prefix = label_prefix(change)
+        if change_type == "helm_chart":
+            chart = str(change.get("helm_chart") or "chart")
+            lines.append(f"{prefix}Helm chart `{chart}` updated to `{after}`")
+        elif change_type == "crd_helm_chart":
+            chart = str(change.get("crd_chart") or change.get("helm_chart") or "CRD chart")
+            lines.append(f"{prefix}CRD Helm chart `{chart}` updated to `{after}`")
+        elif change_type == "eol":
+            product = str(change.get("product_label") or "").strip()
+            version = str(change.get("version") or "unknown")
+            product_suffix = f" for {product}" if product else ""
+            lines.append(f"{prefix}EOL{product_suffix} version `{version}` updated to `{after}`")
+        elif change_type == "parent_service_version":
+            parent_repo = str(change.get("parent_repo") or "parent service")
+            lines.append(f"{prefix}Parent service `{parent_repo}` updated to `{after}`")
+        else:
+            field_path = str(change.get("path") or change.get("key") or "value")
+            lines.append(f"{prefix}`{field_path}` updated to `{after}`")
+    return lines
 
 
 def render_release_description(
@@ -663,13 +693,7 @@ def render_release_description(
     next_tag: str,
     planned_changes: list[dict[str, Any]],
 ) -> str:
-    lines = [
-        f"Release {next_tag}",
-        "",
-        "Changes:",
-    ]
-    for change in planned_changes:
-        lines.append(f"- {human_change_description(change)}")
+    lines = [f"Release {next_tag}"]
 
     chart_note_blocks = render_helm_chart_change_notes(planned_changes)
     if chart_note_blocks:
@@ -686,37 +710,33 @@ def render_release_description(
         lines.append("")
         lines.append("Parent service changes:")
         lines.extend(parent_note_blocks)
+    maintenance_summaries = render_maintenance_summaries(planned_changes)
+    if maintenance_summaries:
+        lines.append("")
+        for summary in maintenance_summaries:
+            lines.append(f"({summary})")
     return "\n".join(lines)
 
 
 def render_helm_chart_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
-    """Render and deduplicate per-version chart notes stored on planned changes."""
-    grouped: dict[tuple[str, str], list[dict[str, str]]] = {}
-    seen: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    """Render customer-facing chart changes without chart version metadata."""
+    entries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for change in planned_changes:
         for note in change.get("chart_change_notes") or []:
-            chart = str(note.get("chart") or "unknown chart")
-            version = str(note.get("version") or "unknown version")
-            key = (chart, version)
-            entries = grouped.setdefault(key, [])
-            identities = seen.setdefault(key, set())
             for entry in note.get("changes") or []:
                 kind = str(entry.get("kind") or "changed").strip().lower()
                 description = str(entry.get("description") or "").strip()
                 identity = (kind, description)
-                if not description or identity in identities:
+                if not description or identity in seen:
                     continue
-                identities.add(identity)
+                seen.add(identity)
                 entries.append({"kind": kind, "description": description})
 
     lines: list[str] = []
-    for (chart, version), entries in grouped.items():
-        if not entries:
-            continue
-        lines.append(f"- `{chart}` `{version}`")
-        for entry in entries:
-            label = entry["kind"].replace("_", " ").capitalize()
-            lines.append(f"  - {label}: {entry['description']}")
+    for entry in entries:
+        label = entry["kind"].replace("_", " ").capitalize()
+        lines.append(f"- {label}: {entry['description']}")
     return lines
 
 
@@ -746,14 +766,53 @@ def render_tag_note_details(note: dict[str, Any], indent: int = 0) -> list[str]:
     return lines
 
 
-def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
+def customer_change_messages(note: dict[str, Any]) -> list[str]:
+    """Flatten nested tag notes to the release messages customers care about."""
+    messages: list[str] = []
+    message = str(note.get("message") or note.get("reason") or "").strip()
+    ignored_prefixes = (
+        "Base image stability tag updated to ",
+        "Base image repo could not be resolved ",
+        "Image tag change notes lookup failed:",
+        "Parent service tag description lookup failed:",
+        "Tag description was not found.",
+        "Tag is lightweight; no tag description was found.",
+        "Tag note traversal stopped ",
+        "Parent service traversal stopped ",
+    )
+    if message and not message.startswith(ignored_prefixes):
+        messages.append(message)
+    for child in note.get("base_changes") or []:
+        messages.extend(customer_change_messages(child))
+    for child in note.get("parent_changes") or []:
+        messages.extend(customer_change_messages(child))
+    return messages
+
+
+def render_customer_change_notes(notes: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
+    seen: set[str] = set()
+    for note in notes:
+        for message in customer_change_messages(note):
+            if message in seen:
+                continue
+            seen.add(message)
+            message_lines = message.splitlines()
+            first_line = message_lines[0].strip()
+            if first_line.startswith(("- ", "* ")):
+                first_line = first_line[2:].strip()
+            lines.append(f"- {first_line}")
+            for message_line in message_lines[1:]:
+                lines.append(f"  {message_line}" if message_line else "")
+    return lines
+
+
+def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for change in planned_changes:
         if change.get("change_type") != "image_tag":
             continue
         image = str(change.get("image") or "")
-        image_version = str(change.get("image_version") or "")
         target = str(change.get("after") or "")
         notes = change.get("image_change_notes") or []
         note = notes[0] if notes else None
@@ -761,37 +820,19 @@ def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str
             str(note.get("repo") or image) if note else image,
             str(note.get("tag") or target) if note else target,
         )
-        group = grouped.setdefault(
+        grouped.setdefault(
             group_key,
             {
                 "image": image,
                 "note": note,
-                "updates": [],
             },
         )
-        group["updates"].append(
-            {
-                "version": image_version,
-                "before": format_diff_value(change.get("before")),
-                "after": format_diff_value(change.get("after")),
-            }
-        )
 
-    for group in grouped.values():
-        note = group.get("note")
-        if not note:
-            continue
-        lines.append(f"- {note.get('repo')}:{note.get('tag')}")
-        lines.append("  Versions updated:")
-        for item in group["updates"]:
-            lines.append(f"  - {item['version']}: {item['before']} -> {item['after']}")
-        lines.append("  Changes:")
-        lines.extend(render_tag_note_details(note, 2))
-    return lines
+    notes = [group["note"] for group in grouped.values() if group.get("note")]
+    return render_customer_change_notes(notes)
 
 
 def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for change in planned_changes:
         if change.get("change_type") != "parent_service_version":
@@ -804,33 +845,17 @@ def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) ->
             str(note.get("repo") or parent_repo) if note else parent_repo,
             str(note.get("tag") or parent_tag) if note else parent_tag,
         )
-        group = grouped.setdefault(
+        grouped.setdefault(
             group_key,
             {
                 "repo": group_key[0],
                 "tag": group_key[1],
                 "note": note,
-                "updates": [],
             },
         )
-        group["updates"].append(
-            {
-                "file": str(change.get("file") or "service.yml"),
-                "before": format_diff_value(change.get("before")),
-                "after": format_diff_value(change.get("after")),
-            }
-        )
 
-    for group in grouped.values():
-        lines.append(f"- {group['repo']}:{group['tag']}")
-        lines.append("  Resolved parent versions updated:")
-        for item in group["updates"]:
-            lines.append(f"  - {item['file']}: {item['before']} -> {item['after']}")
-        note = group.get("note")
-        if note:
-            lines.append("  Changes:")
-            lines.extend(render_tag_note_details(note, 2))
-    return lines
+    notes = [group["note"] for group in grouped.values() if group.get("note")]
+    return render_customer_change_notes(notes)
 
 
 def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[str, Any]]) -> dict[str, Any]:

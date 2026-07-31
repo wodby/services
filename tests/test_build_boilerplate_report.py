@@ -357,6 +357,50 @@ Keep this repository-specific guidance.
         cycle_note = note["parent_changes"][0]["parent_changes"][0]
         self.assertIn("inheritance cycle", cycle_note["message"])
 
+    def test_service_release_leads_with_image_changes_and_deduplicates_tag_updates(self) -> None:
+        image_note = {
+            "repo": "wodby/node",
+            "tag": "1.72.2",
+            "message": "node updates: 26.5.1, 24.18.1",
+            "base_changes": [],
+        }
+        planned_changes = [
+            {
+                "change_type": "image_tag",
+                "image": "wodby/node",
+                "image_version": version,
+                "before": before,
+                "after": after,
+                "image_change_notes": [copy.deepcopy(image_note)],
+            }
+            for version, before, after in (
+                ("26", "26-1.72.1", "26-1.72.2"),
+                ("24", "24-1.72.1", "24-1.72.2"),
+                ("22", "22-1.72.1", "22-1.72.2"),
+            )
+        ]
+
+        description = render_release_description(
+            "service-node",
+            "1.0.6",
+            "1.0.7",
+            planned_changes,
+        )
+
+        self.assertEqual(
+            description,
+            """\
+Release 1.0.7
+
+Image changes:
+- node updates: 26.5.1, 24.18.1
+
+(wodby/node image tags updated: `26-1.72.2` for `26`; `24-1.72.2` for `24`; `22-1.72.2` for `22`)""",
+        )
+        self.assertNotIn("Versions updated:", description)
+        self.assertNotIn("\nChanges:\n", description)
+        self.assertNotIn("Technical changes:", description)
+
     def test_wodby_chart_changes_are_included_in_service_release_description(self) -> None:
         generator = FakeGenerator()
         reference = "oci://registry-1.docker.io/wodby/nginx"
@@ -399,13 +443,19 @@ Keep this repository-specific guidance.
         )
 
         self.assertIn("Helm chart changes:", description)
-        self.assertIn("- `nginx` `0.2.3`", description)
-        self.assertIn("- `nginx` `0.2.4`", description)
         self.assertIn(
-            "  - Fixed: Preserve the configured replica count during upgrades",
+            "- Fixed: Preserve the configured replica count during upgrades",
             description,
         )
-        self.assertIn("  - Changed: Update the default ingress timeout", description)
+        self.assertIn("- Changed: Update the default ingress timeout", description)
+        self.assertGreater(
+            description.index("(Helm chart"),
+            description.index("Helm chart changes:"),
+        )
+        self.assertIn(
+            "(Helm chart `oci://registry-1.docker.io/wodby/nginx` updated to `0.2.4`)",
+            description,
+        )
 
     def test_wodby_chart_change_notes_require_the_requested_version(self) -> None:
         generator = FakeGenerator()
