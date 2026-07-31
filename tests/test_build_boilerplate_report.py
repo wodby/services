@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from service_report_email import build_body, event_counts, repo_items  # noqa: E402
 from service_update_report import (  # noqa: E402
     UpdateReportGenerator,
+    render_release_description,
     render_markdown,
     render_tag_note_details,
 )
@@ -28,6 +29,9 @@ class FakeGenerator(UpdateReportGenerator):
         self.tags: dict[tuple[str, str], set[str]] = {}
         self.tag_notes: dict[tuple[str, str, str], dict] = {}
         self.service_data_at_refs: dict[tuple[str, str, str], dict] = {}
+        self.wodby_chart_metadata: dict[str, dict] = {}
+        self.oci_tags: dict[str, list[str]] = {}
+        self.oci_chart_metadata: dict[tuple[str, str], dict] = {}
 
     def get_repo_file(self, repo: str, path: str) -> str | None:
         return self.repo_files.get((repo, path))
@@ -53,6 +57,15 @@ class FakeGenerator(UpdateReportGenerator):
     ) -> dict | None:
         data = self.service_data_at_refs.get((repo, ref, manifest_path))
         return copy.deepcopy(data) if data is not None else None
+
+    def get_wodby_chart_metadata(self, chart_name: str) -> dict:
+        return copy.deepcopy(self.wodby_chart_metadata[chart_name])
+
+    def get_oci_tags(self, reference: str) -> list[str]:
+        return list(self.oci_tags.get(reference) or [])
+
+    def get_oci_chart_metadata(self, reference: str, version: str) -> dict:
+        return copy.deepcopy(self.oci_chart_metadata[(reference, version)])
 
 
 class BuildBoilerplateReportTest(unittest.TestCase):
@@ -343,6 +356,75 @@ Keep this repository-specific guidance.
 
         cycle_note = note["parent_changes"][0]["parent_changes"][0]
         self.assertIn("inheritance cycle", cycle_note["message"])
+
+    def test_wodby_chart_changes_are_included_in_service_release_description(self) -> None:
+        generator = FakeGenerator()
+        reference = "oci://registry-1.docker.io/wodby/nginx"
+        generator.oci_tags[reference] = ["0.2.2", "0.2.3", "0.2.4"]
+        generator.oci_chart_metadata[(reference, "0.2.3")] = {
+            "version": "0.2.3",
+            "annotations": {
+                "artifacthub.io/changes": """\
+- kind: fixed
+  description: Preserve the configured replica count during upgrades
+""",
+            },
+        }
+        generator.oci_chart_metadata[(reference, "0.2.4")] = {
+            "version": "0.2.4",
+            "annotations": {
+                "artifacthub.io/changes": "- Update the default ingress timeout\n",
+            },
+        }
+
+        notes = generator.get_helm_chart_change_notes(
+            reference,
+            reference,
+            "0.2.2",
+            "0.2.4",
+        )
+        description = render_release_description(
+            "service-nginx",
+            "1.0.0",
+            "1.0.1",
+            [
+                {
+                    "change_type": "helm_chart",
+                    "helm_chart": "oci://registry-1.docker.io/wodby/nginx",
+                    "before": "0.2.2",
+                    "after": "0.2.4",
+                    "chart_change_notes": notes,
+                }
+            ],
+        )
+
+        self.assertIn("Helm chart changes:", description)
+        self.assertIn("- `nginx` `0.2.3`", description)
+        self.assertIn("- `nginx` `0.2.4`", description)
+        self.assertIn(
+            "  - Fixed: Preserve the configured replica count during upgrades",
+            description,
+        )
+        self.assertIn("  - Changed: Update the default ingress timeout", description)
+
+    def test_wodby_chart_change_notes_require_the_requested_version(self) -> None:
+        generator = FakeGenerator()
+        reference = "oci://registry-1.docker.io/wodby/nginx"
+        generator.oci_tags[reference] = ["0.2.3"]
+        generator.oci_chart_metadata[(reference, "0.2.3")] = {
+            "version": "0.2.4",
+            "annotations": {
+                "artifacthub.io/changes": "- kind: fixed\n  description: A fix\n",
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "expected `0.2.3`"):
+            generator.get_helm_chart_change_notes(
+                reference,
+                reference,
+                "0.2.2",
+                "0.2.3",
+            )
 
 
 def sample_build_boilerplate_report() -> dict:

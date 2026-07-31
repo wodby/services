@@ -29,6 +29,8 @@ GITHUB_CONTENTS_URL = "https://api.github.com/repos/{owner}/{repo}/contents/{pat
 GITHUB_REF_URL = "https://api.github.com/repos/{owner}/{repo}/git/ref/{ref_path}"
 GITHUB_TAGS_URL = "https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
 WODBY_CHART_URL = "https://raw.githubusercontent.com/{owner}/charts/main/{chart}/Chart.yaml"
+ARTIFACTHUB_CHANGES_ANNOTATION = "artifacthub.io/changes"
+OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 ENDOFLIFE_PRODUCTS_URL = "https://endoflife.date/api/v1/products"
 ENDOFLIFE_PRODUCT_URL = "https://endoflife.date/api/v1/products/{product}/"
 TAILSCALE_STABLE_URL = "https://pkgs.tailscale.com/stable/"
@@ -669,6 +671,11 @@ def render_release_description(
     for change in planned_changes:
         lines.append(f"- {human_change_description(change)}")
 
+    chart_note_blocks = render_helm_chart_change_notes(planned_changes)
+    if chart_note_blocks:
+        lines.append("")
+        lines.append("Helm chart changes:")
+        lines.extend(chart_note_blocks)
     image_note_blocks = render_image_change_notes(planned_changes)
     if image_note_blocks:
         lines.append("")
@@ -680,6 +687,37 @@ def render_release_description(
         lines.append("Parent service changes:")
         lines.extend(parent_note_blocks)
     return "\n".join(lines)
+
+
+def render_helm_chart_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
+    """Render and deduplicate per-version chart notes stored on planned changes."""
+    grouped: dict[tuple[str, str], list[dict[str, str]]] = {}
+    seen: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for change in planned_changes:
+        for note in change.get("chart_change_notes") or []:
+            chart = str(note.get("chart") or "unknown chart")
+            version = str(note.get("version") or "unknown version")
+            key = (chart, version)
+            entries = grouped.setdefault(key, [])
+            identities = seen.setdefault(key, set())
+            for entry in note.get("changes") or []:
+                kind = str(entry.get("kind") or "changed").strip().lower()
+                description = str(entry.get("description") or "").strip()
+                identity = (kind, description)
+                if not description or identity in identities:
+                    continue
+                identities.add(identity)
+                entries.append({"kind": kind, "description": description})
+
+    lines: list[str] = []
+    for (chart, version), entries in grouped.items():
+        if not entries:
+            continue
+        lines.append(f"- `{chart}` `{version}`")
+        for entry in entries:
+            label = entry["kind"].replace("_", " ").capitalize()
+            lines.append(f"  - {label}: {entry['description']}")
+    return lines
 
 
 def render_tag_note(note: dict[str, Any], indent: int = 0) -> list[str]:
@@ -909,11 +947,13 @@ class UpdateReportGenerator:
         self._base_image_repo_cache: dict[tuple[str, str, str | None], str | None] = {}
         self._image_change_notes_cache: dict[tuple[str, str | None, str, str | None], list[dict[str, Any]]] = {}
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
+        self._oci_chart_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._oci_pull_headers_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
         self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self._service_data_at_ref_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
-        self._wodby_chart_cache: dict[str, str] = {}
+        self._wodby_chart_metadata_cache: dict[str, dict[str, Any]] = {}
         self._wodby_chart_values_cache: dict[str, dict[str, Any]] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
         self._eol_product_cache: dict[str, dict[str, Any] | None] = {}
@@ -1874,6 +1914,169 @@ class UpdateReportGenerator:
             self._wodby_chart_values_cache[chart_name] = payload
         return self._wodby_chart_values_cache[chart_name]
 
+    def get_wodby_chart_metadata(self, chart_name: str) -> dict[str, Any]:
+        if chart_name not in self._wodby_chart_metadata_cache:
+            url = WODBY_CHART_URL.format(owner=self.owner, chart=chart_name)
+            payload = yaml.safe_load(self.fetch(url).text) or {}
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{chart_name} Chart.yaml did not decode to a mapping")
+            self._wodby_chart_metadata_cache[chart_name] = payload
+        return self._wodby_chart_metadata_cache[chart_name]
+
+    def wodby_chart_name(self, source: str | None, chart: str | None) -> str | None:
+        for reference in (chart, source):
+            parsed = urlparse(str(reference or ""))
+            repo = parsed.path.lstrip("/")
+            if (
+                parsed.scheme == "oci"
+                and parsed.netloc in ("docker.io", "registry-1.docker.io", "index.docker.io")
+                and repo.startswith(f"{self.owner}/")
+            ):
+                return repo.split("/", 1)[1]
+        return None
+
+    @staticmethod
+    def artifacthub_chart_changes(metadata: dict[str, Any]) -> list[dict[str, str]]:
+        """Normalize Artifact Hub's plain and structured chart change formats."""
+        annotations = metadata.get("annotations")
+        if not isinstance(annotations, dict):
+            return []
+        raw_changes = annotations.get(ARTIFACTHUB_CHANGES_ANNOTATION)
+        if raw_changes is None or raw_changes == "":
+            return []
+        changes = yaml.safe_load(raw_changes) if isinstance(raw_changes, str) else raw_changes
+        if changes is None:
+            return []
+        if not isinstance(changes, list):
+            raise RuntimeError(f"{ARTIFACTHUB_CHANGES_ANNOTATION} did not decode to a list")
+
+        normalized: list[dict[str, str]] = []
+        for index, change in enumerate(changes, start=1):
+            if isinstance(change, str):
+                kind = "changed"
+                description = change.strip()
+            elif isinstance(change, dict):
+                kind = str(change.get("kind") or "changed").strip().lower()
+                description = str(change.get("description") or "").strip()
+            else:
+                raise RuntimeError(
+                    f"{ARTIFACTHUB_CHANGES_ANNOTATION} entry {index} must be a string or mapping"
+                )
+            if not description:
+                raise RuntimeError(
+                    f"{ARTIFACTHUB_CHANGES_ANNOTATION} entry {index} has no description"
+                )
+            normalized.append({"kind": kind, "description": description})
+        return normalized
+
+    @staticmethod
+    def oci_chart_reference(source: str | None, chart: str | None) -> str | None:
+        for reference in (chart, source):
+            if str(reference or "").startswith("oci://"):
+                return str(reference)
+        return None
+
+    def get_oci_chart_metadata(self, reference: str, version: str) -> dict[str, Any]:
+        """Load the packaged Chart.yaml metadata from an exact OCI chart release."""
+        cache_key = (reference, version)
+        if cache_key in self._oci_chart_metadata_cache:
+            return self._oci_chart_metadata_cache[cache_key]
+
+        parsed = urlparse(reference)
+        if parsed.scheme != "oci":
+            raise RuntimeError(f"unsupported OCI chart reference {reference}")
+        registry = parsed.netloc
+        repo = parsed.path.lstrip("/")
+        if not registry or not repo:
+            raise RuntimeError(f"unable to determine OCI chart repository for {reference}")
+        request_registry = (
+            "registry-1.docker.io"
+            if registry in ("docker.io", "registry-1.docker.io", "index.docker.io")
+            else registry
+        )
+        auth_key = (request_registry, repo)
+        request_headers = dict(self._oci_pull_headers_cache.get(auth_key) or {})
+        request_headers["Accept"] = OCI_IMAGE_MANIFEST_MEDIA_TYPE
+        manifest_url = (
+            f"https://{request_registry}/v2/{repo}/manifests/{quote(version, safe='')}"
+        )
+        response = self.session.get(manifest_url, headers=request_headers, timeout=60)
+        if response.status_code == 401:
+            token = self.registry_bearer_token(
+                request_registry,
+                repo,
+                response.headers.get("WWW-Authenticate", ""),
+            )
+            if token:
+                auth_headers = {"Authorization": f"Bearer {token}"}
+                self._oci_pull_headers_cache[auth_key] = auth_headers
+                request_headers.update(auth_headers)
+                response = self.session.get(manifest_url, headers=request_headers, timeout=60)
+        response.raise_for_status()
+        manifest = response.json()
+        config = manifest.get("config") or {}
+        digest = str(config.get("digest") or "")
+        if not digest:
+            raise RuntimeError(f"OCI chart {reference}:{version} manifest has no config digest")
+
+        config_url = f"https://{request_registry}/v2/{repo}/blobs/{quote(digest, safe=':')}"
+        config_response = self.session.get(
+            config_url,
+            headers=self._oci_pull_headers_cache.get(auth_key) or {},
+            timeout=60,
+        )
+        config_response.raise_for_status()
+        metadata = config_response.json()
+        if not isinstance(metadata, dict):
+            raise RuntimeError(f"OCI chart {reference}:{version} config did not decode to a mapping")
+        self._oci_chart_metadata_cache[cache_key] = metadata
+        return metadata
+
+    def get_helm_chart_change_notes(
+        self,
+        source: str | None,
+        chart: str | None,
+        previous_version: str,
+        target_version: str,
+    ) -> list[dict[str, Any]]:
+        """Collect Wodby chart notes for every released version in an update range."""
+        chart_name = self.wodby_chart_name(source, chart)
+        if chart_name is None:
+            return []
+        reference = self.oci_chart_reference(source, chart)
+        if reference is None:
+            return []
+
+        previous = parse_version(previous_version)
+        target = parse_version(target_version)
+        versions: list[tuple[Version, str]] = []
+        if previous is not None and target is not None:
+            for published_version in self.get_oci_tags(reference):
+                parsed_version = parse_version(published_version)
+                if (
+                    parsed_version is not None
+                    and not parsed_version.is_prerelease
+                    and previous < parsed_version <= target
+                ):
+                    versions.append((parsed_version, published_version))
+        if not any(raw == target_version for _parsed, raw in versions):
+            versions.append((target or Version("0"), target_version))
+        versions.sort()
+
+        notes: list[dict[str, Any]] = []
+        for _parsed, version in versions:
+            metadata = self.get_oci_chart_metadata(reference, version)
+            metadata_version = str(metadata.get("version") or "")
+            if metadata_version != version:
+                raise RuntimeError(
+                    f"wodby/charts `{chart_name}` OCI metadata is version `{metadata_version}`, "
+                    f"expected `{version}`"
+                )
+            changes = self.artifacthub_chart_changes(metadata)
+            if changes:
+                notes.append({"chart": chart_name, "version": version, "changes": changes})
+        return notes
+
     def get_wodby_chart_image_tag(self, chart: str | None) -> str | None:
         if not chart:
             return None
@@ -2009,13 +2212,9 @@ class UpdateReportGenerator:
         return candidates[0][1]
 
     def get_helm_latest(self, source: str, chart: str) -> str | None:
-        if source.startswith("oci://registry-1.docker.io/wodby/"):
-            chart_name = chart.rsplit("/", 1)[-1]
-            if chart_name not in self._wodby_chart_cache:
-                url = WODBY_CHART_URL.format(owner=self.owner, chart=chart_name)
-                payload = yaml.safe_load(self.fetch(url).text)
-                self._wodby_chart_cache[chart_name] = str(payload["version"])
-            return self._wodby_chart_cache[chart_name]
+        chart_name = self.wodby_chart_name(source, chart)
+        if chart_name is not None:
+            return str(self.get_wodby_chart_metadata(chart_name)["version"])
 
         if source.startswith("oci://"):
             reference = chart if chart.startswith("oci://") else source
@@ -2129,6 +2328,16 @@ class UpdateReportGenerator:
                 f"{prefix}updating CRD chart `{display}` to `{target_version}` "
                 f"(current: `{current_version}`)"
             )
+            chart_change_notes: list[dict[str, Any]] = []
+            try:
+                chart_change_notes = self.get_helm_chart_change_notes(
+                    str(chart_source), str(chart), current_version, target_version
+                )
+            except Exception as exc:
+                result["warnings"].append(
+                    f"{prefix}CRD Helm chart change notes lookup failed for `{display}` "
+                    f"version `{target_version}`: {exc}"
+                )
             result["updates"].append(message)
             raw_crd_chart = raw_crd_chart_index.get(name)
             if raw_crd_chart is not None and raw_crd_chart.get("version") is not None:
@@ -2144,6 +2353,7 @@ class UpdateReportGenerator:
                             "change_type": "crd_helm_chart",
                             "helm_chart": chart,
                             "crd_chart": display,
+                            "chart_change_notes": chart_change_notes,
                             "service_label": service_label,
                         },
                     )
@@ -2769,6 +2979,16 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         )
                         updates.append(message)
                         if isinstance(raw_helm, dict) and raw_helm.get("version") is not None:
+                            chart_change_notes: list[dict[str, Any]] = []
+                            try:
+                                chart_change_notes = generator.get_helm_chart_change_notes(
+                                    helm_source, helm_chart, helm_version, latest_chart
+                                )
+                            except Exception as exc:
+                                warnings.append(
+                                    f"{prefix}Helm chart change notes lookup failed for `{helm_chart}` "
+                                    f"version `{latest_chart}`: {exc}"
+                                )
                             planned_changes.append(
                                 make_planned_change(
                                     manifest_path,
@@ -2780,6 +3000,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                     {
                                         "change_type": "helm_chart",
                                         "helm_chart": helm_chart,
+                                        "chart_change_notes": chart_change_notes,
                                         "service_label": label if multiple_manifests else "",
                                     },
                                 )
