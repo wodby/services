@@ -101,6 +101,7 @@ Before publishing a service for others to use, review:
 | Cloud PostgreSQL | [wodby/service-cloud-postgres](https://github.com/wodby/service-cloud-postgres) |
 | Valkey | [wodby/service-valkey](https://github.com/wodby/service-valkey) |
 | Redis | [wodby/service-redis](https://github.com/wodby/service-redis) |
+| Memcached | [wodby/service-memcached](https://github.com/wodby/service-memcached) |
 | RabbitMQ | [wodby/service-rabbitmq](https://github.com/wodby/service-rabbitmq) |
 | Solr | [wodby/service-solr](https://github.com/wodby/service-solr) |
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
