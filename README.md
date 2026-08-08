@@ -107,6 +107,14 @@ Before publishing a service for others to use, review:
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
 | Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
 
+### Database administration
+
+| Service | Repository |
+| --- | --- |
+| Adminer | [wodby/service-adminer](https://github.com/wodby/service-adminer) |
+| phpMyAdmin | [wodby/service-phpmyadmin](https://github.com/wodby/service-phpmyadmin) |
+| pgAdmin | [wodby/service-pgadmin](https://github.com/wodby/service-pgadmin) |
+
 ### Observability apps
 
 | Service | Repository |
