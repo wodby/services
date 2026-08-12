@@ -61,6 +61,7 @@ Before publishing a service for others to use, review:
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | Dagster | [wodby/service-dagster](https://github.com/wodby/service-dagster) |
+| Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
 
 ### Web and edge
 
