@@ -105,6 +105,7 @@ Before publishing a service for others to use, review:
 | Redis | [wodby/service-redis](https://github.com/wodby/service-redis) |
 | Memcached | [wodby/service-memcached](https://github.com/wodby/service-memcached) |
 | RabbitMQ | [wodby/service-rabbitmq](https://github.com/wodby/service-rabbitmq) |
+| Distribution Registry | [wodby/service-distribution](https://github.com/wodby/service-distribution) |
 | Solr | [wodby/service-solr](https://github.com/wodby/service-solr) |
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
 | Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
