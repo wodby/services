@@ -17,7 +17,7 @@ from service_update_report import UpdateReportGenerator, latest_stable_semver_ta
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
-CRD_CHART_PATH_RE = re.compile(r"^crdCharts\[name=(?P<name>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
+CRD_CHART_PATH_RE = re.compile(r"^helm\.crdCharts\[name=(?P<name>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
 YAML_RT = YAML()
 YAML_RT.preserve_quotes = True
 
@@ -159,9 +159,12 @@ def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
 
     match = CRD_CHART_PATH_RE.match(path)
     if match and key == match.group("field"):
-        crd_charts = data.get("crdCharts")
+        helm = data.get("helm")
+        if not isinstance(helm, dict):
+            raise RuntimeError(f"{path} cannot be updated because helm is not a mapping")
+        crd_charts = helm.get("crdCharts")
         if not isinstance(crd_charts, list):
-            raise RuntimeError(f"{path} cannot be updated because crdCharts is not a list")
+            raise RuntimeError(f"{path} cannot be updated because helm.crdCharts is not a list")
         wanted_name = match.group("name")
         matches = [
             chart
@@ -208,6 +211,54 @@ def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
     raise RuntimeError(f"unsupported planned change path: {path}")
 
 
+def validate_helm_crd_chart_changes(
+    data: dict[str, Any],
+    changes: list[dict[str, Any]],
+    manifest_path: str,
+) -> None:
+    """Prevent a main Helm chart update from leaving declared CRD charts behind."""
+    helm_changes = [change for change in changes if change.get("path") == "helm.version"]
+    if not helm_changes:
+        return
+    if len(helm_changes) != 1:
+        raise RuntimeError(f"{manifest_path} must contain exactly one planned helm.version change")
+
+    target_version = normalize(helm_changes[0].get("after"))
+    if not target_version:
+        raise RuntimeError(f"{manifest_path} planned helm.version change has no target version")
+
+    helm = data.get("helm")
+    if not isinstance(helm, dict):
+        raise RuntimeError(f"{manifest_path} helm.version cannot be updated because helm is not a mapping")
+    crd_charts = helm.get("crdCharts")
+    if crd_charts is None:
+        return
+    if not isinstance(crd_charts, list):
+        raise RuntimeError(f"{manifest_path} helm.crdCharts is not a list")
+
+    seen_names: set[str] = set()
+    for crd_chart in crd_charts:
+        if not isinstance(crd_chart, dict):
+            raise RuntimeError(f"{manifest_path} helm.crdCharts contains a non-mapping entry")
+        chart_name = normalize(crd_chart.get("name"))
+        if not chart_name:
+            raise RuntimeError(f"{manifest_path} helm.crdCharts contains a chart without a name")
+        if chart_name in seen_names:
+            raise RuntimeError(f"{manifest_path} helm.crdCharts contains duplicate name {chart_name}")
+        seen_names.add(chart_name)
+
+        if normalize(crd_chart.get("version")) == target_version:
+            continue
+
+        change_path = f"helm.crdCharts[name={chart_name}].version"
+        chart_changes = [change for change in changes if change.get("path") == change_path]
+        if len(chart_changes) != 1 or normalize(chart_changes[0].get("after")) != target_version:
+            raise RuntimeError(
+                f"{manifest_path} cannot update helm.version to {target_version} without updating "
+                f"CRD chart {chart_name} to the same version"
+            )
+
+
 def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]) -> list[str]:
     changed_files: list[str] = []
     changes_by_file: dict[str, list[dict[str, Any]]] = {}
@@ -225,6 +276,8 @@ def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]
             raise RuntimeError(f"{manifest_path} did not decode to a mapping")
         if data.get("from") and any(change.get("change_type") == "eol" for change in changes):
             raise RuntimeError(f"{manifest_path} is a child service manifest; refusing to apply option EOL updates")
+
+        validate_helm_crd_chart_changes(data, changes, manifest_path)
 
         for change in changes:
             set_yaml_value(data, change)
