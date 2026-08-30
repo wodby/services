@@ -2295,11 +2295,13 @@ class UpdateReportGenerator:
             "warnings": [],
             "planned_changes": [],
             "updates_without_local_diff": [],
+            "ready": True,
         }
         if not crd_charts:
             return result
         if not isinstance(crd_charts, list):
             result["warnings"].append(f"{prefix}`crdCharts` is not a list and cannot be compared automatically")
+            result["ready"] = False
             return result
         if not isinstance(raw_crd_charts, list):
             raw_crd_charts = []
@@ -2311,11 +2313,13 @@ class UpdateReportGenerator:
                 f"{prefix}duplicate `crdCharts` name entries found for {names}; "
                 "automated CRD chart updates for those names are disabled"
             )
+            result["ready"] = False
         raw_crd_chart_index = raw_crd_charts_by_name(raw_crd_charts)
 
         for crd_chart in crd_charts:
             if not isinstance(crd_chart, dict):
                 result["warnings"].append(f"{prefix}`crdCharts` contains a non-mapping entry")
+                result["ready"] = False
                 continue
 
             name = str(crd_chart.get("name") or "").strip()
@@ -2328,11 +2332,13 @@ class UpdateReportGenerator:
                 result["warnings"].append(
                     f"{prefix}CRD Helm chart `{display}` has no `name`; automated updates are disabled"
                 )
+                result["ready"] = False
                 continue
             if not chart_source or not chart or current_version is None:
                 result["warnings"].append(
                     f"{prefix}CRD Helm chart `{display}` is incomplete and cannot be compared automatically"
                 )
+                result["ready"] = False
                 continue
 
             current_version = str(current_version)
@@ -2347,6 +2353,7 @@ class UpdateReportGenerator:
                     f"{prefix}CRD Helm chart `{display}` does not publish version `{target_version}`; "
                     f"leaving current version `{current_version}`"
                 )
+                result["ready"] = False
                 continue
 
             message = (
@@ -2369,7 +2376,7 @@ class UpdateReportGenerator:
                 result["planned_changes"].append(
                     make_planned_change(
                         manifest_path,
-                        f"crdCharts[name={name}].version",
+                        f"helm.crdCharts[name={name}].version",
                         "version",
                         raw_crd_chart.get("version"),
                         target_version,
@@ -2385,8 +2392,9 @@ class UpdateReportGenerator:
                 )
             else:
                 result["updates_without_local_diff"].append(
-                    f"{message}; no unique local `crdCharts` entry with a `version` field in `{manifest_path}`"
+                    f"{message}; no unique local `helm.crdCharts` entry with a `version` field in `{manifest_path}`"
                 )
+                result["ready"] = False
 
         return result
 
@@ -2814,8 +2822,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             helm_source = helm.get("source") if helm else None
             helm_chart = (helm.get("chart") or helm_source) if helm else None
             helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
-            crd_charts = service_data.get("crdCharts")
-            raw_crd_charts = raw_service_data.get("crdCharts")
+            crd_charts = helm.get("crdCharts") if helm else None
+            raw_crd_charts = raw_helm.get("crdCharts") if isinstance(raw_helm, dict) else None
             expects_image = not external and not parent_name and service_type != "infrastructure"
             expects_helm = not external and not parent_name
             expects_options = not external and not parent_name and service_type != "infrastructure"
@@ -2983,6 +2991,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             if helm and helm_source and helm_chart and helm_version:
                 comparable = True
                 planned_helm_target: str | None = None
+                planned_helm_change: dict[str, Any] | None = None
                 try:
                     latest_chart = generator.get_helm_latest(helm_source, helm_chart)
                     if latest_chart is None:
@@ -3014,21 +3023,19 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                     f"{prefix}Helm chart change notes lookup failed for `{helm_chart}` "
                                     f"version `{latest_chart}`: {exc}"
                                 )
-                            planned_changes.append(
-                                make_planned_change(
-                                    manifest_path,
-                                    "helm.version",
-                                    "version",
-                                    raw_helm.get("version"),
-                                    latest_chart,
-                                    message,
-                                    {
-                                        "change_type": "helm_chart",
-                                        "helm_chart": helm_chart,
-                                        "chart_change_notes": chart_change_notes,
-                                        "service_label": label if multiple_manifests else "",
-                                    },
-                                )
+                            planned_helm_change = make_planned_change(
+                                manifest_path,
+                                "helm.version",
+                                "version",
+                                raw_helm.get("version"),
+                                latest_chart,
+                                message,
+                                {
+                                    "change_type": "helm_chart",
+                                    "helm_chart": helm_chart,
+                                    "chart_change_notes": chart_change_notes,
+                                    "service_label": label if multiple_manifests else "",
+                                },
                             )
                             planned_helm_target = latest_chart
                         else:
@@ -3038,7 +3045,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 except Exception as exc:
                     warnings.append(f"{prefix}helm version lookup failed for `{helm_chart}` from `{helm_source}`: {exc}")
 
-                if planned_helm_target is not None:
+                if planned_helm_target is not None and planned_helm_change is not None:
+                    crd_ready = False
                     try:
                         crd_result = generator.check_crd_chart_updates(
                             crd_charts,
@@ -3051,10 +3059,18 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         updates.extend(crd_result["updates"])
                         current.extend(crd_result["current"])
                         warnings.extend(crd_result["warnings"])
-                        planned_changes.extend(crd_result["planned_changes"])
                         updates_without_local_diff.extend(crd_result["updates_without_local_diff"])
+                        crd_ready = bool(crd_result["ready"])
+                        if crd_ready:
+                            planned_changes.append(planned_helm_change)
+                            planned_changes.extend(crd_result["planned_changes"])
                     except Exception as exc:
                         warnings.append(f"{prefix}CRD Helm chart lookup failed for target `{planned_helm_target}`: {exc}")
+                    if not crd_ready:
+                        warnings.append(
+                            f"{prefix}deferring Helm chart update to `{planned_helm_target}` until every "
+                            "CRD Helm chart can be updated to the same version"
+                        )
             elif expects_helm:
                 if not helm:
                     warnings.append(f"{prefix}no local `helm` section was found for this non-external service")
