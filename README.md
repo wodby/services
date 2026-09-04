@@ -145,6 +145,7 @@ Before publishing a service for others to use, review:
 | --- | --- |
 | Prometheus | [wodby/service-prometheus](https://github.com/wodby/service-prometheus) |
 | Grafana | [wodby/service-grafana](https://github.com/wodby/service-grafana) |
+| Kibana | [wodby/service-kibana](https://github.com/wodby/service-kibana) |
 | Grafana Loki | [wodby/service-loki](https://github.com/wodby/service-loki) |
 | VictoriaMetrics | [wodby/service-victoria-metrics](https://github.com/wodby/service-victoria-metrics) |
 
