@@ -98,7 +98,6 @@ Before publishing a service for others to use, review:
 | --- | --- |
 | MariaDB | [wodby/service-mariadb](https://github.com/wodby/service-mariadb) |
 | PostgreSQL | [wodby/service-postgres](https://github.com/wodby/service-postgres) |
-| PostgreSQL with pgvector | [wodby/service-pgvector](https://github.com/wodby/service-pgvector) |
 | PostGIS | [wodby/service-postgis](https://github.com/wodby/service-postgis) |
 | Cloud MySQL | [wodby/service-cloud-mysql](https://github.com/wodby/service-cloud-mysql) |
 | Cloud MariaDB | [wodby/service-cloud-mariadb](https://github.com/wodby/service-cloud-mariadb) |
