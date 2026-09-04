@@ -51,6 +51,7 @@ Before publishing a service for others to use, review:
 | WordPress PHP | [wodby/service-wordpress-php](https://github.com/wodby/service-wordpress-php) |
 | Laravel PHP | [wodby/service-laravel-php](https://github.com/wodby/service-laravel-php) |
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
+| Ghost | [wodby/service-ghost](https://github.com/wodby/service-ghost) |
 | Python | [wodby/service-python](https://github.com/wodby/service-python) |
 | Django | [wodby/service-django](https://github.com/wodby/service-django) |
 | FastAPI | [wodby/service-fastapi](https://github.com/wodby/service-fastapi) |
@@ -96,6 +97,7 @@ Before publishing a service for others to use, review:
 | Service | Repository |
 | --- | --- |
 | MariaDB | [wodby/service-mariadb](https://github.com/wodby/service-mariadb) |
+| MySQL | [wodby/service-mysql](https://github.com/wodby/service-mysql) |
 | PostgreSQL | [wodby/service-postgres](https://github.com/wodby/service-postgres) |
 | PostGIS | [wodby/service-postgis](https://github.com/wodby/service-postgis) |
 | Cloud MySQL | [wodby/service-cloud-mysql](https://github.com/wodby/service-cloud-mysql) |
