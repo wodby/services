@@ -131,6 +131,7 @@ Before publishing a service for others to use, review:
 | Service | Repository |
 | --- | --- |
 | Adminer | [wodby/service-adminer](https://github.com/wodby/service-adminer) |
+| Mongoku | [wodby/service-mongoku](https://github.com/wodby/service-mongoku) |
 | phpMyAdmin | [wodby/service-phpmyadmin](https://github.com/wodby/service-phpmyadmin) |
 | pgAdmin | [wodby/service-pgadmin](https://github.com/wodby/service-pgadmin) |
 
