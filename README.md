@@ -62,6 +62,7 @@ Before publishing a service for others to use, review:
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | Dagster | [wodby/service-dagster](https://github.com/wodby/service-dagster) |
 | Chatwoot | [wodby/service-chatwoot](https://github.com/wodby/service-chatwoot) |
+| Mattermost | [wodby/service-mattermost](https://github.com/wodby/service-mattermost) |
 | Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
 
 ### Web and edge
