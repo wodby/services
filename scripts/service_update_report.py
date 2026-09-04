@@ -34,6 +34,10 @@ OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 ENDOFLIFE_PRODUCTS_URL = "https://endoflife.date/api/v1/products"
 ENDOFLIFE_PRODUCT_URL = "https://endoflife.date/api/v1/products/{product}/"
 TAILSCALE_STABLE_URL = "https://pkgs.tailscale.com/stable/"
+SSH_SIGNATURE_BLOCK_RE = re.compile(
+    r"(?ms)^[ \t]*-----BEGIN SSH SIGNATURE-----\r?\n"
+    r".*?^[ \t]*-----END SSH SIGNATURE-----[ \t]*(?:\r?\n)?"
+)
 
 EOL_PRODUCT_ALIASES = {
     "cloud-mariadb": "mariadb",
@@ -749,10 +753,15 @@ def render_tag_note(note: dict[str, Any], indent: int = 0) -> list[str]:
     return lines
 
 
+def strip_ssh_signature_blocks(message: str) -> str:
+    """Remove raw SSH signatures that GitHub includes in annotated tag messages."""
+    return SSH_SIGNATURE_BLOCK_RE.sub("", message).strip()
+
+
 def render_tag_note_details(note: dict[str, Any], indent: int = 0) -> list[str]:
     prefix = "  " * indent
     lines: list[str] = []
-    message = str(note.get("message") or note.get("reason") or "").strip()
+    message = strip_ssh_signature_blocks(str(note.get("message") or note.get("reason") or ""))
     if message:
         for message_line in message.splitlines():
             lines.append(f"{prefix}{message_line}")
@@ -769,7 +778,7 @@ def render_tag_note_details(note: dict[str, Any], indent: int = 0) -> list[str]:
 def customer_change_messages(note: dict[str, Any]) -> list[str]:
     """Flatten nested tag notes to the release messages customers care about."""
     messages: list[str] = []
-    message = str(note.get("message") or note.get("reason") or "").strip()
+    message = strip_ssh_signature_blocks(str(note.get("message") or note.get("reason") or ""))
     ignored_prefixes = (
         "Base image stability tag updated to ",
         "Base image repo could not be resolved ",
@@ -882,7 +891,7 @@ def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[
         "title": next_tag,
         "description": description,
         "commands": [
-            f"git tag -a {next_tag} -F release-notes.md",
+            f"git tag --no-sign -a {next_tag} -F release-notes.md",
             f"git push origin {next_tag}",
         ],
     }
@@ -1580,7 +1589,7 @@ class UpdateReportGenerator:
             )
             tag_response.raise_for_status()
             tag_data = tag_response.json()
-            note["message"] = str(tag_data.get("message") or "").strip()
+            note["message"] = strip_ssh_signature_blocks(str(tag_data.get("message") or ""))
         else:
             note["message"] = "Tag is lightweight; no tag description was found."
 

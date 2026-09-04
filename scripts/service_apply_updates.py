@@ -383,6 +383,18 @@ def configure_git_identity(repo_dir: Path) -> None:
         )
 
 
+def create_annotated_tag(repo_dir: Path, tag: str, description: str) -> None:
+    """Create a release tag without inheriting the caller's signing configuration."""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+        fh.write(description.rstrip() + "\n")
+        release_notes_path = fh.name
+
+    try:
+        run_git(repo_dir, "tag", "--no-sign", "-a", tag, "-F", release_notes_path)
+    finally:
+        Path(release_notes_path).unlink(missing_ok=True)
+
+
 def commit_push_and_tag(
     repo_dir: Path,
     repo: str,
@@ -432,15 +444,11 @@ def commit_push_and_tag(
 
     validate_planned_release(repo_dir, release)
 
-    description = str(release.get("description") or f"Release {tag}")
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
-        fh.write(description.rstrip() + "\n")
-        release_notes_path = fh.name
-
     tag_created = False
     push_succeeded = False
     try:
-        run_git(repo_dir, "tag", "-a", tag, "-F", release_notes_path)
+        description = str(release.get("description") or f"Release {tag}")
+        create_annotated_tag(repo_dir, tag, description)
         tag_created = True
         if committed:
             run_git(repo_dir, "push", "--atomic", "origin", f"HEAD:{branch}", f"refs/tags/{tag}")
@@ -450,7 +458,6 @@ def commit_push_and_tag(
     finally:
         if tag_created and not push_succeeded:
             run_git(repo_dir, "tag", "-d", tag, check=False)
-        Path(release_notes_path).unlink(missing_ok=True)
 
     if committed:
         status = "applied"
