@@ -57,6 +57,7 @@ Before publishing a service for others to use, review:
 | Flask | [wodby/service-flask](https://github.com/wodby/service-flask) |
 | Ruby | [wodby/service-ruby](https://github.com/wodby/service-ruby) |
 | Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
+| Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
