@@ -107,8 +107,20 @@ Before publishing a service for others to use, review:
 | RabbitMQ | [wodby/service-rabbitmq](https://github.com/wodby/service-rabbitmq) |
 | Distribution Registry | [wodby/service-distribution](https://github.com/wodby/service-distribution) |
 | Solr | [wodby/service-solr](https://github.com/wodby/service-solr) |
+| Elasticsearch | [wodby/service-elasticsearch](https://github.com/wodby/service-elasticsearch) |
+| OpenSearch | [wodby/service-opensearch](https://github.com/wodby/service-opensearch) |
+| ClickHouse | [wodby/service-clickhouse](https://github.com/wodby/service-clickhouse) |
+| Apache Kafka | [wodby/service-kafka](https://github.com/wodby/service-kafka) |
+| Apache Spark | [wodby/service-spark](https://github.com/wodby/service-spark) |
+| Apache Airflow | [wodby/service-airflow](https://github.com/wodby/service-airflow) |
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
 | Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
+
+### Identity and access
+
+| Service | Repository |
+| --- | --- |
+| Keycloak | [wodby/service-keycloak](https://github.com/wodby/service-keycloak) |
 
 ### Database administration
 
@@ -123,6 +135,9 @@ Before publishing a service for others to use, review:
 | Service | Repository |
 | --- | --- |
 | Prometheus | [wodby/service-prometheus](https://github.com/wodby/service-prometheus) |
+| Grafana | [wodby/service-grafana](https://github.com/wodby/service-grafana) |
+| Grafana Loki | [wodby/service-loki](https://github.com/wodby/service-loki) |
+| VictoriaMetrics | [wodby/service-victoria-metrics](https://github.com/wodby/service-victoria-metrics) |
 
 ### Mail
 
