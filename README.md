@@ -60,6 +60,9 @@ Before publishing a service for others to use, review:
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
+| Angular | [wodby/service-angular](https://github.com/wodby/service-angular) |
+| React | [wodby/service-react](https://github.com/wodby/service-react) |
+| Vue | [wodby/service-vue](https://github.com/wodby/service-vue) |
 | Dagster | [wodby/service-dagster](https://github.com/wodby/service-dagster) |
 | Chatwoot | [wodby/service-chatwoot](https://github.com/wodby/service-chatwoot) |
 | Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
