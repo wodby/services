@@ -13,6 +13,7 @@ from service_update_report import (  # noqa: E402
     render_release_description,
     render_markdown,
     render_tag_note_details,
+    strip_ssh_signature_blocks,
 )
 from update_repository_readmes import (  # noqa: E402
     build_boilerplates,
@@ -69,6 +70,21 @@ class FakeGenerator(UpdateReportGenerator):
 
 
 class BuildBoilerplateReportTest(unittest.TestCase):
+    def test_ssh_signatures_are_removed_from_tag_messages(self) -> None:
+        message = """\
+Customer-facing change.
+  -----BEGIN SSH SIGNATURE-----
+  signature payload
+  -----END SSH SIGNATURE-----
+
+Additional detail.
+"""
+
+        self.assertEqual(
+            strip_ssh_signature_blocks(message),
+            "Customer-facing change.\n\nAdditional detail.",
+        )
+
     def test_readme_generator_supports_canonical_and_legacy_fields(self) -> None:
         canonical = [{"name": "canonical"}]
         legacy = [{"name": "legacy"}]
