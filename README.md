@@ -98,6 +98,12 @@ Before publishing a service for others to use, review:
 | 3X UI | [wodby/service-3xui](https://github.com/wodby/service-3xui) |
 | FRP Server | [wodby/service-frps](https://github.com/wodby/service-frps) |
 
+### Backend platforms
+
+| Service | Repository |
+| --- | --- |
+| Supabase | [wodby/service-supabase](https://github.com/wodby/service-supabase) |
+
 ### Data, search, and messaging
 
 | Service | Repository |
@@ -105,6 +111,7 @@ Before publishing a service for others to use, review:
 | MariaDB | [wodby/service-mariadb](https://github.com/wodby/service-mariadb) |
 | MySQL | [wodby/service-mysql](https://github.com/wodby/service-mysql) |
 | PostgreSQL | [wodby/service-postgres](https://github.com/wodby/service-postgres) |
+| Supabase PostgreSQL | [wodby/service-supabase-postgres](https://github.com/wodby/service-supabase-postgres) |
 | PostGIS | [wodby/service-postgis](https://github.com/wodby/service-postgis) |
 | Cloud MySQL | [wodby/service-cloud-mysql](https://github.com/wodby/service-cloud-mysql) |
 | Cloud MariaDB | [wodby/service-cloud-mariadb](https://github.com/wodby/service-cloud-mariadb) |
