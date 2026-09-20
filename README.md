@@ -17,6 +17,12 @@ and configuration. They are not user-deployable catalog components.
 - Service template reference: https://wodby.com/docs/2.0/services/template/
 - Service boilerplate: https://github.com/wodby/service
 
+Wodby-maintained images use revision tags such as `11.4-r0`. Service option
+versions continue to identify the application version; each option's `tag`
+selects a published image revision. The updater preserves variants such as
+PostGIS and checks that revision tags exist in both the image registry and Git.
+Service releases and Helm chart versions continue to use semantic versions.
+
 ## Create a service
 
 Use the [service boilerplate](https://github.com/wodby/service) when you want to
