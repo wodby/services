@@ -215,12 +215,17 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
     },
 }
 
-WODBY_TAG_RE = re.compile(r"^(?P<base>\d+(?:\.\d+)*)(?:-(?P<stability>\d+(?:\.\d+)*))?$")
+WODBY_TAG_RE = re.compile(
+    r"^(?P<base>\d+(?:\.\d+)*)"
+    r"(?:-(?P<variant>[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*?))?"
+    r"-(?P<release>r(?:0|[1-9]\d*)|\d+(?:\.\d+)*)$"
+)
+IMAGE_RELEASE_ALIAS_RE = re.compile(r"^\S+ from image release (?P<release>r(?:0|[1-9]\d*))$", re.MULTILINE)
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
 CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+\.\d+)$")
-BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image stability tag updated to (?P<tag>\S+)", re.IGNORECASE)
+BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image (?:stability|revision) tag updated to (?P<tag>\S+)", re.IGNORECASE)
 FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):", re.MULTILINE)
 README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
 SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+){0,2})(?:p(?P<portable>\d+))?$")
@@ -781,6 +786,7 @@ def customer_change_messages(note: dict[str, Any]) -> list[str]:
     message = strip_ssh_signature_blocks(str(note.get("message") or note.get("reason") or ""))
     ignored_prefixes = (
         "Base image stability tag updated to ",
+        "Base image revision tag updated to ",
         "Base image repo could not be resolved ",
         "Image tag change notes lookup failed:",
         "Parent service tag description lookup failed:",
@@ -1757,22 +1763,29 @@ class UpdateReportGenerator:
             return []
 
         target_match = WODBY_TAG_RE.match(target_tag)
-        stability_tag = target_match.group("stability") if target_match else None
-        if stability_tag is None:
+        release_tag = target_match.group("release") if target_match else None
+        if release_tag is None:
             self._image_change_notes_cache[cache_key] = []
             return []
 
         _registry, image_repo = self.image_repository(image)
         repo = image_repo.split("/", 1)[1]
         try:
-            notes = [self.build_wodby_tag_note_tree(repo, stability_tag, image_version)]
+            if release_tag.startswith("r"):
+                # Full-version revision counters can differ from the repository release.
+                alias = self.get_github_tag_note(self.owner, repo, target_tag)
+                match = IMAGE_RELEASE_ALIAS_RE.search(str((alias or {}).get("message") or ""))
+                if not match:
+                    raise ValueError(f"Image alias {target_tag} does not identify its repository release")
+                release_tag = match.group("release")
+            notes = [self.build_wodby_tag_note_tree(repo, release_tag, image_version)]
         except Exception as exc:
             notes = [
                 {
                     "repo": f"{self.owner}/{repo}",
-                    "tag": stability_tag,
+                    "tag": release_tag,
                     "message": f"Image tag change notes lookup failed: {exc}",
-                    "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{stability_tag}",
+                    "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{release_tag}",
                     "base_changes": [],
                 }
             ]
@@ -2142,6 +2155,10 @@ class UpdateReportGenerator:
             current_value = self.get_wodby_chart_image_tag(helm_chart)
 
         parsed = parse_source_version(current_value)
+        if parsed is None and current_field == "wodby_chart_image_tag":
+            match = WODBY_TAG_RE.fullmatch(str(current_value or ""))
+            if match:
+                parsed = parse_source_version(match.group("base"))
         if parsed is None:
             return []
         return [(parsed, str(current_value))]
@@ -2407,29 +2424,50 @@ class UpdateReportGenerator:
 
         return result
 
-    def latest_wodby_tag(self, wanted: str, published_tags: list[str], valid_stabilities: set[str]) -> str | None:
-        def pick(exact_only: bool) -> str | None:
-            candidates: list[tuple[Version | None, Version | None, str]] = []
+    def latest_wodby_tag(
+        self, wanted: str, published_tags: list[str], git_tags: set[str], configured: str | None = None
+    ) -> str | None:
+        """Prefer published revision aliases, preserving image variants and legacy pins."""
+        current = WODBY_TAG_RE.fullmatch(configured or "")
+        variant = current.group("variant") if current else None
+
+        def pick(exact_only: bool, revisions: bool) -> str | None:
+            candidates: list[tuple[Version, Version, str]] = []
             for tag in published_tags:
-                match = WODBY_TAG_RE.match(tag)
+                match = WODBY_TAG_RE.fullmatch(tag)
                 if not match:
                     continue
                 base = match.group("base")
-                stability = match.group("stability")
-                if stability is None or stability not in valid_stabilities:
+                release = match.group("release")
+                if match.group("variant") != variant or release.startswith("r") != revisions:
+                    continue
+                # Revision Docker tags have matching annotated Git aliases. Legacy
+                # image tags refer to the repository's semantic-version release.
+                if (tag if revisions else release) not in git_tags:
                     continue
                 if exact_only:
                     if not exact_match(base, wanted):
                         continue
                 elif not family_match(base, wanted):
                     continue
-                candidates.append((parse_version(base), parse_version(stability), tag))
+                parsed_base = parse_version(base)
+                parsed_release = parse_version(release[1:] if revisions else release)
+                if parsed_base is not None and parsed_release is not None:
+                    candidates.append((parsed_base, parsed_release, tag))
             if not candidates:
                 return None
             candidates.sort(reverse=True)
             return candidates[0][2]
 
-        return pick(True) or pick(False)
+        revision = pick(True, True) or pick(False, True)
+        if revision and current and current.group("release").startswith("r"):
+            selected = WODBY_TAG_RE.fullmatch(revision)
+            if (selected.group("base") == current.group("base")
+                    and int(selected.group("release")[1:]) < int(current.group("release")[1:])):
+                return None
+        if revision or (current and current.group("release").startswith("r")):
+            return revision
+        return pick(True, False) or pick(False, False)
 
     def latest_external_tag(self, wanted: str, published_tags: list[str], configured: str | None) -> str | None:
         candidates: list[tuple[Version | None, int, str]] = []
@@ -2918,14 +2956,14 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     image_prefix = prefix if len(images) == 1 else f"{prefix}[image {image}] "
                     try:
                         published_tags = generator.get_image_tags(image)
-                        valid_stabilities = None
+                        image_git_tags = None
                         if generator.is_owner_image(image):
                             _registry, image_repo = generator.image_repository(image)
-                            valid_stabilities = generator.get_github_tags(args.owner, image_repo.split("/", 1)[1])
+                            image_git_tags = generator.get_github_tags(args.owner, image_repo.split("/", 1)[1])
                     except Exception as exc:
                         warnings.append(f"{image_prefix}image lookup failed for `{image}`: {exc}")
                         published_tags = None
-                        valid_stabilities = None
+                        image_git_tags = None
 
                     if published_tags is None:
                         continue
@@ -2935,7 +2973,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         configured = option.get("tag") or wanted
                         configured_exists = configured in published_tags if configured else False
                         if generator.is_owner_image(image):
-                            target = generator.latest_wodby_tag(wanted, published_tags, valid_stabilities or set())
+                            target = generator.latest_wodby_tag(wanted, published_tags, image_git_tags or set(), configured)
                         else:
                             target = generator.latest_external_tag(wanted, published_tags, configured)
 
