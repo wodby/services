@@ -190,3 +190,4 @@ user-created application stacks.
 | Service | Repository |
 | --- | --- |
 | OpenClaw | [wodby/service-openclaw](https://github.com/wodby/service-openclaw) |
+| vLLM (preview) | [wodby/service-vllm](https://github.com/wodby/service-vllm) |
