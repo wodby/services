@@ -18,6 +18,12 @@ NOTIFICATION_GROUP_ORDER = [
     "missing_version_source",
     "missing_eol",
 ]
+RELEASES_ENABLED_NOTE = "The workflow applies these service changes and releases these git tags when the apply step succeeds."
+RELEASES_DISABLED_NOTE = (
+    "Automatic releases are disabled, so the workflow did not apply these service changes or release these git tags. "
+    "To release them, set the SERVICE_AUTO_RELEASE repository variable to true or run the workflow manually with "
+    "release enabled."
+)
 NOTIFICATION_GROUP_TITLES = {
     "major_version": "New Major Version Detected",
     "helm_major_version": "New Helm Major Version Detected",
@@ -34,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sha", default="", help="Git commit SHA.")
     parser.add_argument("--workflow-result", default="", help="Aggregated update job result.")
     parser.add_argument("--artifact-result", default="", help="Report artifact download step result.")
+    parser.add_argument(
+        "--releases-disabled",
+        action="store_true",
+        help="Say that planned service changes and git tags were not released.",
+    )
     return parser.parse_args()
 
 
@@ -166,7 +177,14 @@ def append_grouped_notifications(lines: list[str], items: list[dict[str, Any]]) 
             lines.append("")
 
 
-def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -> None:
+def planned_changes_note(releases_disabled: bool) -> str:
+    """Describes whether the run released the planned changes and git tags."""
+    return RELEASES_DISABLED_NOTE if releases_disabled else RELEASES_ENABLED_NOTE
+
+
+def append_repo_planned_changes(
+    lines: list[str], items: list[dict[str, Any]], releases_disabled: bool = False
+) -> None:
     selected = [
         (item, item.get("planned_release") or {}, item.get("planned_diffs") or [])
         for item in items
@@ -177,7 +195,7 @@ def append_repo_planned_changes(lines: list[str], items: list[dict[str, Any]]) -
 
     lines.append("Service Changes and Git Tags")
     lines.append("")
-    lines.append("The workflow applies these service changes and releases these git tags when the apply step succeeds.")
+    lines.append(planned_changes_note(releases_disabled))
     lines.append("")
     for item, release, planned_diffs in selected:
         lines.append(f"{item['repo']}:")
@@ -275,6 +293,7 @@ def build_body(
     sha: str,
     workflow_result: str,
     artifact_result: str,
+    releases_disabled: bool = False,
 ) -> str:
     lines: list[str] = []
     lines.append("Service update report events were detected.")
@@ -304,7 +323,7 @@ def build_body(
         lines.append("Report artifacts could not be downloaded. Check the workflow run logs for collection errors.")
         lines.append("")
 
-    append_repo_planned_changes(lines, items)
+    append_repo_planned_changes(lines, items, releases_disabled)
     append_repo_dry_run_changes(lines, items)
     append_repo_build_boilerplate_review(lines, items)
     append_repo_apply_results(lines, items)
@@ -463,7 +482,7 @@ def html_grouped_notifications(items: list[dict[str, Any]]) -> str:
     return "".join(blocks)
 
 
-def html_planned_changes(items: list[dict[str, Any]]) -> str:
+def html_planned_changes(items: list[dict[str, Any]], releases_disabled: bool = False) -> str:
     selected = [
         (item, item.get("planned_release") or {}, item.get("planned_diffs") or [])
         for item in items
@@ -475,8 +494,7 @@ def html_planned_changes(items: list[dict[str, Any]]) -> str:
     blocks = [
         "<h2 style=\"margin:28px 0 12px 0;font-size:20px;color:#111827;\">"
         "Service Changes and Git Tags</h2>",
-        "<p style=\"margin:0 0 12px 0;color:#4b5563;\">"
-        "The workflow applies these service changes and releases these git tags when the apply step succeeds.</p>",
+        f"<p style=\"margin:0 0 12px 0;color:#4b5563;\">{html.escape(planned_changes_note(releases_disabled))}</p>",
     ]
     for item, release, planned_diffs in selected:
         blocks.append(
@@ -580,7 +598,7 @@ def html_apply_results(items: list[dict[str, Any]]) -> str:
     ]
     for item, result in selected:
         status = str(result.get("status") or "unknown")
-        color = "#991b1b" if status == "failed" else "#166534"
+        color = {"failed": "#991b1b", "disabled": "#92400e"}.get(status, "#166534")
         rows = [
             ("Status", f"<strong style=\"color:{color};\">{html.escape(status)}</strong>"),
         ]
@@ -619,6 +637,7 @@ def build_html_body(
     sha: str,
     workflow_result: str,
     artifact_result: str,
+    releases_disabled: bool = False,
 ) -> str:
     status_color = "#991b1b" if counts["workflow_failures"] or counts["artifact_failures"] else "#166534"
     summary_rows = "".join(
@@ -665,7 +684,7 @@ def build_html_body(
             "<strong>Report Artifact Failure</strong><br>Report artifacts could not be downloaded. Check the workflow run logs for collection errors."
             "</div>"
         )
-    body.append(html_planned_changes(items))
+    body.append(html_planned_changes(items, releases_disabled))
     body.append(html_dry_run_changes(items))
     body.append(html_build_boilerplate_review(items))
     body.append(html_apply_results(items))
@@ -759,6 +778,7 @@ def main() -> int:
         sha=args.sha,
         workflow_result=args.workflow_result,
         artifact_result=args.artifact_result,
+        releases_disabled=args.releases_disabled,
     )
     html_body = build_html_body(
         reports,
@@ -769,6 +789,7 @@ def main() -> int:
         sha=args.sha,
         workflow_result=args.workflow_result,
         artifact_result=args.artifact_result,
+        releases_disabled=args.releases_disabled,
     )
     print(subject)
     print("")
