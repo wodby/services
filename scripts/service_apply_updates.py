@@ -26,9 +26,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Apply planned service update report changes to a service repo.")
     parser.add_argument("--report-dir", required=True, help="Directory containing service-update-report.json.")
     parser.add_argument("--repo", required=True, help="Service repository name, for example service-nginx.")
-    parser.add_argument("--repo-dir", required=True, help="Checked-out service repository directory.")
+    parser.add_argument("--repo-dir", help="Checked-out service repository directory.")
     parser.add_argument("--owner", default="wodby", help="GitHub owner/org that owns the service repo.")
-    return parser.parse_args()
+    parser.add_argument(
+        "--releases-disabled",
+        action="store_true",
+        help="Record the planned release as disabled without changing the service repo.",
+    )
+    args = parser.parse_args()
+    if not args.releases_disabled and not args.repo_dir:
+        parser.error("--repo-dir is required unless --releases-disabled is set")
+    return args
 
 
 def run_git(repo_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -479,7 +487,6 @@ def commit_push_and_tag(
 
 def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
     report_dir = Path(args.report_dir)
-    repo_dir = Path(args.repo_dir)
     report = load_report(report_dir)
     item = repo_item(report, args.repo)
     planned_changes = item.get("planned_changes") or []
@@ -499,6 +506,21 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
         item["apply_result"] = result
         return report, result
 
+    # Releases are opt-in, so a planned release is only reported. The next
+    # enabled run plans the same changes and tag again.
+    if args.releases_disabled:
+        result = {
+            "status": "disabled",
+            "repo": args.repo,
+            "message": (
+                f"Automatic releases are disabled; the changes were not committed and tag {release['tag']} "
+                "was not pushed."
+            ),
+        }
+        item["apply_result"] = result
+        return report, result
+
+    repo_dir = Path(args.repo_dir)
     branch = prepare_repo_for_apply(repo_dir)
     validate_planned_release(repo_dir, release)
     validate_planned_image_tags(args.owner, planned_changes)

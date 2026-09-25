@@ -23,6 +23,12 @@ selects a published image revision. The updater preserves variants such as
 PostGIS and checks that revision tags exist in both the image registry and Git.
 Service releases and Helm chart versions continue to use semantic versions.
 
+The Service Update workflow checks service repositories weekly and after each
+push to `master`, then emails a report of available updates. It releases
+planned updates only when the `SERVICE_AUTO_RELEASE` repository variable is
+`true` or a manual run enables **release**. A release commits the updates to
+the service repository and pushes a new patch tag.
+
 ## Create a service
 
 Use the [service boilerplate](https://github.com/wodby/service) when you want to

@@ -21,8 +21,19 @@ on:
         options:
           - report
           - off
+      release:
+        description: Commit planned updates to service repositories and push release tags
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
+
+env:
+  # Releasing commits planned updates to each service repository's default
+  # branch and pushes a new tag. It is off unless the SERVICE_AUTO_RELEASE
+  # repository variable is "true" or a manual run sets the release input.
+  RELEASES_ENABLED: ${{ vars.SERVICE_AUTO_RELEASE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.release) }}
 
 concurrency:
   group: service-update
@@ -246,11 +257,22 @@ jobs:
           details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
           release = (details or {}).get("planned_release") or {}
           planned_changes = (details or {}).get("planned_changes") or []
-          apply_needed = bool(planned_changes and release.get("status") == "planned")
+          planned = bool(planned_changes and release.get("status") == "planned")
+          enabled = os.environ.get("RELEASES_ENABLED") == "true"
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
-              fh.write(f"apply_needed={str(apply_needed).lower()}\n")
-          print(f"apply_needed={apply_needed}")
+              fh.write(f"apply_needed={str(planned and enabled).lower()}\n")
+              fh.write(f"release_disabled={str(planned and not enabled).lower()}\n")
+          print(f"planned={planned} releases_enabled={enabled}")
           PY
+
+      - name: Record Disabled Release
+        if: steps.apply-scope.outputs.release_disabled == 'true'
+        run: |
+          python scripts/service_apply_updates.py \
+            --report-dir "$REPORT_DIR" \
+            --owner wodby \
+            --repo "$SERVICE_REPO" \
+            --releases-disabled
 
       - name: Check Out Service Repository
         if: steps.apply-scope.outputs.apply_needed == 'true'
@@ -551,11 +573,22 @@ jobs:
           details = next((item for item in report["per_repo"] if item["repo"] == repo), None)
           release = (details or {}).get("planned_release") or {}
           planned_changes = (details or {}).get("planned_changes") or []
-          apply_needed = bool(planned_changes and release.get("status") == "planned")
+          planned = bool(planned_changes and release.get("status") == "planned")
+          enabled = os.environ.get("RELEASES_ENABLED") == "true"
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
-              fh.write(f"apply_needed={str(apply_needed).lower()}\n")
-          print(f"apply_needed={apply_needed}")
+              fh.write(f"apply_needed={str(planned and enabled).lower()}\n")
+              fh.write(f"release_disabled={str(planned and not enabled).lower()}\n")
+          print(f"planned={planned} releases_enabled={enabled}")
           PY
+
+      - name: Record Disabled Release
+        if: steps.apply-scope.outputs.release_disabled == 'true'
+        run: |
+          python scripts/service_apply_updates.py \
+            --report-dir "$REPORT_DIR" \
+            --owner wodby \
+            --repo "$SERVICE_REPO" \
+            --releases-disabled
 
       - name: Check Out Service Repository
         if: steps.apply-scope.outputs.apply_needed == 'true'
@@ -817,7 +850,11 @@ jobs:
           SMTP_SSL: ${{ secrets.SMTP_SSL }}
           SMTP_STARTTLS: ${{ secrets.SMTP_STARTTLS }}
         run: |
-          python scripts/service_report_email.py reports \
+          release_args=()
+          if [[ "$RELEASES_ENABLED" != "true" ]]; then
+            release_args+=(--releases-disabled)
+          fi
+          python scripts/service_report_email.py reports "${release_args[@]}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --event "${{ github.event_name }}" \
             --sha "${{ github.sha }}" \
