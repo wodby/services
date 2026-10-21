@@ -298,6 +298,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def development_image_tag(tag: str) -> str | None:
+    """Return the development companion of a Wodby image tag, including variants."""
+    match = WODBY_TAG_RE.fullmatch(tag)
+    if match is None:
+        return None
+    variant = f"-{match.group('variant')}" if match.group("variant") else ""
+    return f"{match.group('base')}{variant}-dev-{match.group('release')}"
+
+
 def parse_version(value: str | None) -> Version | None:
     if value is None:
         return None
@@ -2425,11 +2434,13 @@ class UpdateReportGenerator:
         return result
 
     def latest_wodby_tag(
-        self, wanted: str, published_tags: list[str], git_tags: set[str], configured: str | None = None
+        self, wanted: str, published_tags: list[str], git_tags: set[str], configured: str | None = None,
+        require_development: bool = False,
     ) -> str | None:
         """Prefer published revision aliases, preserving image variants and legacy pins."""
         current = WODBY_TAG_RE.fullmatch(configured or "")
         variant = current.group("variant") if current else None
+        published = set(published_tags)
 
         def pick(exact_only: bool, revisions: bool) -> str | None:
             candidates: list[tuple[Version, Version, str]] = []
@@ -2444,6 +2455,8 @@ class UpdateReportGenerator:
                 # Revision Docker tags have matching annotated Git aliases. Legacy
                 # image tags refer to the repository's semantic-version release.
                 if (tag if revisions else release) not in git_tags:
+                    continue
+                if require_development and development_image_tag(tag) not in published:
                     continue
                 if exact_only:
                     if not exact_match(base, wanted):
@@ -2972,13 +2985,22 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         wanted = str(option.get("version"))
                         configured = option.get("tag") or wanted
                         configured_exists = configured in published_tags if configured else False
+                        paired = generator.is_owner_image(image) and bool(option.get("devTag"))
                         if generator.is_owner_image(image):
-                            target = generator.latest_wodby_tag(wanted, published_tags, image_git_tags or set(), configured)
+                            target = generator.latest_wodby_tag(
+                                wanted, published_tags, image_git_tags or set(), configured,
+                                require_development=paired,
+                            )
                         else:
                             target = generator.latest_external_tag(wanted, published_tags, configured)
 
                         if target is None:
-                            if configured and configured_exists:
+                            if paired:
+                                warnings.append(
+                                    f"{image_prefix}no published production/development image pair found for "
+                                    f"version `{wanted}` without rolling back `{configured}`; leaving both tags unchanged"
+                                )
+                            elif configured and configured_exists:
                                 current.append(
                                     f"{image_prefix}no newer published image tag family was found for version `{wanted}`; current tag `{configured}` exists"
                                 )
@@ -3026,6 +3048,37 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                 updates_without_local_diff.append(
                                     f"{message}; additional image comparison is report only"
                                 )
+
+                        # Repair a stale devTag even when production is already current.
+                        if paired and target is not None:
+                            dev_target = development_image_tag(target)
+                            if option.get("devTag") == dev_target:
+                                continue
+                            message = (
+                                f"{image_prefix}updating devTag to `{dev_target}` for version `{wanted}` "
+                                f"(current: `{option.get('devTag')}`)"
+                            )
+                            updates.append(message)
+                            raw_option = raw_option_index.get(wanted)
+                            if raw_option is not None and can_plan_image_changes:
+                                planned_changes.append(
+                                    make_planned_change(
+                                        manifest_path,
+                                        f"options[version={wanted}].devTag",
+                                        "devTag",
+                                        raw_option.get("devTag"),
+                                        dev_target,
+                                        message,
+                                        {
+                                            "change_type": "image_tag",
+                                            "image": image,
+                                            "image_version": wanted,
+                                            "service_label": label if multiple_manifests else "",
+                                        },
+                                    )
+                                )
+                            else:
+                                updates_without_local_diff.append(f"{message}; no updateable primary image option")
 
             elif images and not options:
                 if expects_options:

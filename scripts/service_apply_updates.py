@@ -13,7 +13,12 @@ from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
-from service_update_report import UpdateReportGenerator, latest_stable_semver_tag, render_markdown
+from service_update_report import (
+    UpdateReportGenerator,
+    development_image_tag,
+    latest_stable_semver_tag,
+    render_markdown,
+)
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
@@ -267,6 +272,29 @@ def validate_helm_crd_chart_changes(
             )
 
 
+def validate_development_image_changes(data: dict[str, Any], manifest_path: str) -> None:
+    """Refuse to write a Wodby manifest with mismatched development image tags."""
+    images = UpdateReportGenerator.get_service_images(data)
+    owner_image = False
+    for image in images:
+        if ":" in image.rsplit("/", 1)[-1] or "@" in image:
+            continue
+        registry, repo = UpdateReportGenerator.image_repository(image)
+        if registry in ("docker.io", "registry-1.docker.io", "index.docker.io") and repo.startswith("wodby/"):
+            owner_image = True
+    if not owner_image:
+        return
+    for option in data.get("options") or []:
+        tag = str(option.get("tag") or "")
+        if not option.get("devTag") or not re.fullmatch(r".+-r[0-9]+", tag):
+            continue
+        expected = development_image_tag(tag)
+        if expected is None or option["devTag"] != expected:
+            raise RuntimeError(
+                f"{manifest_path} option {option.get('version')} must pair {tag} with {expected}"
+            )
+
+
 def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]) -> list[str]:
     changed_files: list[str] = []
     changes_by_file: dict[str, list[dict[str, Any]]] = {}
@@ -289,6 +317,8 @@ def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]
 
         for change in changes:
             set_yaml_value(data, change)
+
+        validate_development_image_changes(data, manifest_path)
 
         with path.open("w") as fh:
             YAML_RT.dump(data, fh)
