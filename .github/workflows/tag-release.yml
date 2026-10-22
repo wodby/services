@@ -1,0 +1,105 @@
+name: Publish annotated tag release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing annotated semantic-version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-release-${{ github.repository }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate version tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          number = r"(?:0|[1-9][0-9]*)"
+          identifier = rf"(?:{number}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          version = rf"v?{number}\.{number}\.{number}"
+          prerelease = rf"(?:-{identifier}(?:\.{identifier})*)?"
+          metadata = r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+          if not re.fullmatch(version + prerelease + metadata, os.environ["RELEASE_TAG"]):
+              raise SystemExit("Release tag must be a semantic version, optionally prefixed with v")
+          PY
+
+      - name: Check out tagged repository
+        uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Publish tag description
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import tempfile
+          from urllib.parse import quote
+
+          def git(*args):
+              """Read the checked-out tag without running repository scripts."""
+              return subprocess.check_output(["git", *args], text=True).rstrip("\n")
+
+          tag = os.environ["RELEASE_TAG"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          if git("cat-file", "-t", f"refs/tags/{tag}") != "tag":
+              raise SystemExit("Release tag must be annotated; commit messages are not release notes")
+
+          description = git("tag", "--list", tag, "--format=%(contents)")
+          signature = git("tag", "--list", tag, "--format=%(contents:signature)")
+          if signature:
+              description = description.removesuffix(signature).rstrip("\n")
+          if not description.strip():
+              raise SystemExit("Release tag must have a non-empty description")
+
+          existing = subprocess.run(
+              ["gh", "api", f"repos/{repository}/releases/tags/{quote(tag, safe='')}"],
+              capture_output=True, text=True,
+          )
+          if existing.returncode == 0:
+              print(f"Release {tag} already exists; keeping its notes and settings")
+              raise SystemExit(0)
+          if "(HTTP 404)" not in existing.stderr:
+              raise SystemExit(existing.stderr or "Unable to check for an existing release")
+
+          with tempfile.NamedTemporaryFile("w", encoding="utf-8") as notes:
+              notes.write(description)
+              notes.flush()
+              command = [
+                  "gh", "release", "create", tag, "--repo", repository,
+                  "--verify-tag", "--title", tag, "--notes-file", notes.name,
+              ]
+              # Build metadata can contain hyphens without making a prerelease.
+              if "-" in tag.split("+", 1)[0]:
+                  command.extend(["--prerelease", "--latest=false"])
+              subprocess.run(command, check=True)
+
+          published = json.loads(subprocess.check_output(
+              ["gh", "release", "view", tag, "--repo", repository, "--json", "body,name,tagName"],
+              text=True,
+          ))
+          if (published["tagName"] != tag or published["name"] != tag
+                  or published["body"].rstrip("\n") != description):
+              raise SystemExit("Published release does not match the tag and its description")
+          print(f"Published {repository} {tag} with its annotated tag description")
+          PY
