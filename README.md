@@ -29,6 +29,23 @@ planned updates only when the `SERVICE_AUTO_RELEASE` repository variable is
 `true` or a manual run enables **release**. A release commits the updates to
 the service repository and pushes a new patch tag.
 
+Repository discovery checks that every active public `service-*` repository is
+listed below. A missing entry fails the workflow so it cannot silently lose
+update coverage. External services have no managed software to update.
+
+GitLab and GitLab Runner are planned and released as one batch. Filtering for
+either service includes both. The updater reads both charts' application
+versions, keeps their major/minor release line aligned, and verifies the exact
+Alpine Runner image tag. Patch versions may differ between the two products.
+It prepares both repositories before publishing either release. Minor and major
+application upgrades require review of GitLab's
+[upgrade path](https://docs.gitlab.com/update/upgrade_paths/).
+
+Each repository's branch and release tag are pushed atomically. GitHub cannot
+publish multiple repositories atomically. If a later batch push fails, the
+report preserves successful releases; rerun the workflow to plan the remaining
+updates from the current repository state.
+
 ## Create a service
 
 Use the [service boilerplate](https://github.com/wodby/service) when you want to
@@ -63,6 +80,7 @@ Before publishing a service for others to use, review:
 | WordPress PHP | [wodby/service-wordpress-php](https://github.com/wodby/service-wordpress-php) |
 | Laravel PHP | [wodby/service-laravel-php](https://github.com/wodby/service-laravel-php) |
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
+| Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
 | Ghost | [wodby/service-ghost](https://github.com/wodby/service-ghost) |
 | Python | [wodby/service-python](https://github.com/wodby/service-python) |
 | Django | [wodby/service-django](https://github.com/wodby/service-django) |
@@ -114,6 +132,8 @@ Before publishing a service for others to use, review:
 
 | Service | Repository |
 | --- | --- |
+| GitLab Community Edition | [wodby/service-gitlab](https://github.com/wodby/service-gitlab) |
+| GitLab Runner | [wodby/service-gitlab-runner](https://github.com/wodby/service-gitlab-runner) |
 | Supabase | [wodby/service-supabase](https://github.com/wodby/service-supabase) |
 
 ### Data, search, and messaging
@@ -121,6 +141,7 @@ Before publishing a service for others to use, review:
 | Service | Repository |
 | --- | --- |
 | MariaDB | [wodby/service-mariadb](https://github.com/wodby/service-mariadb) |
+| MongoDB | [wodby/service-mongodb](https://github.com/wodby/service-mongodb) |
 | MySQL | [wodby/service-mysql](https://github.com/wodby/service-mysql) |
 | PostgreSQL | [wodby/service-postgres](https://github.com/wodby/service-postgres) |
 | Supabase PostgreSQL | [wodby/service-supabase-postgres](https://github.com/wodby/service-supabase-postgres) |

@@ -1,0 +1,24 @@
+name: Test Service Updates
+
+on:
+  pull_request:
+    paths:
+      - README.md
+      - scripts/**
+      - tests/**
+      - .github/workflows/service-update-report.yml
+      - .github/workflows/test-service-updates.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install packaging pyyaml requests ruamel.yaml
+      - run: python -m unittest discover -s tests

@@ -69,6 +69,7 @@ jobs:
       non_child_repo_count: ${{ steps.discover.outputs.non_child_repo_count }}
       child_repos: ${{ steps.discover.outputs.child_repos }}
       child_repo_count: ${{ steps.discover.outputs.child_repo_count }}
+      gitlab_batch_count: ${{ steps.discover.outputs.gitlab_batch_count }}
 
     steps:
       - name: Check Out Repository
@@ -95,7 +96,7 @@ jobs:
           import os
           from pathlib import Path
 
-          from scripts.service_update_report import UpdateReportGenerator, load_service_repos
+          from scripts.service_update_report import GITLAB_REPOS, UpdateReportGenerator, load_service_repos
 
           owner = os.environ["OWNER"]
           repos = load_service_repos(Path("README.md"), owner, os.environ.get("REPO_FILTER", ""))
@@ -103,12 +104,20 @@ jobs:
               raise SystemExit(f"No README-listed service repos matched repo_filter={os.environ.get('REPO_FILTER', '')!r}")
 
           generator = UpdateReportGenerator(owner)
+          catalog = load_service_repos(Path("README.md"), owner, "")
+          public_repos = generator.get_public_service_repos()
+          missing = public_repos - set(catalog)
+          if missing:
+              raise SystemExit(f"Public service repositories missing from the update catalog: {', '.join(sorted(missing))}")
+          print(f"Catalog covers all {len(public_repos)} active public service repositories")
           non_child_repos = []
           child_repos = []
           selected_repos = set(repos)
           repo_dependencies = {}
 
           for repo in repos:
+              if repo in GITLAB_REPOS:
+                  continue
               manifest_paths = generator.get_repo_manifest_paths(repo)
               is_child = False
               dependencies = set()
@@ -148,6 +157,7 @@ jobs:
           child_repos_json = json.dumps(child_repos, separators=(",", ":"))
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
               fh.write(f"repo_count={len(repos)}\n")
+              fh.write(f"gitlab_batch_count={int(bool(set(repos) & set(GITLAB_REPOS)))}\n")
               fh.write(f"repos={repos_json}\n")
               fh.write(f"non_child_repo_count={len(non_child_repos)}\n")
               fh.write(f"non_child_repos={non_child_repos_json}\n")
@@ -162,6 +172,8 @@ jobs:
           for repo in non_child_repos:
               print(f"- {repo}")
           print("")
+          if set(repos) & set(GITLAB_REPOS):
+              print("GitLab batch: " + ", ".join(GITLAB_REPOS))
           print(f"Child phase dependency order ({len(child_repos)} repo(s)):")
           for repo in child_repos:
               print(f"- {repo}")
@@ -503,11 +515,93 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  update-gitlab-services:
+    name: Update GitLab Batch
+    needs: discover-repos
+    if: ${{ needs.discover-repos.outputs.gitlab_batch_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v5
+
+      - name: Set Up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: python -m pip install --upgrade pip packaging pyyaml requests ruamel.yaml
+
+      - name: Set Report Directory
+        run: echo "REPORT_DIR=$RUNNER_TEMP/service-update-report/gitlab-batch" >> "$GITHUB_ENV"
+
+      - name: Plan Complete GitLab Batch
+        env:
+          WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/service_update_report.py \
+            --readme README.md --owner wodby \
+            --repo-filter '^service-gitlab(-runner)?$' \
+            --build-boilerplate-mode "${{ inputs.build_boilerplate_mode || 'report' }}" \
+            --output-dir "$REPORT_DIR"
+
+      - name: Check Out GitLab
+        if: env.RELEASES_ENABLED == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: wodby/service-gitlab
+          path: service-repos/service-gitlab
+          fetch-depth: 0
+          token: ${{ secrets.WODBOT_GITHUB_PAT || github.token }}
+
+      - name: Check Out GitLab Runner
+        if: env.RELEASES_ENABLED == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: wodby/service-gitlab-runner
+          path: service-repos/service-gitlab-runner
+          fetch-depth: 0
+          token: ${{ secrets.WODBOT_GITHUB_PAT || github.token }}
+
+      - name: Validate, Prepare, and Publish GitLab Batch
+        env:
+          WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WODBOT_GIT_EMAIL: ${{ secrets.WODBOT_GIT_EMAIL }}
+          WODBOT_GIT_NAME: ${{ secrets.WODBOT_GIT_NAME }}
+        run: |
+          release_args=()
+          if [[ "$RELEASES_ENABLED" != "true" ]]; then
+            release_args+=(--releases-disabled)
+          fi
+          python scripts/service_apply_gitlab_batch.py \
+            --report-dir "$REPORT_DIR" --repos-dir service-repos "${release_args[@]}"
+
+      - name: Publish Batch Report
+        if: always()
+        run: |
+          if [[ -f "$REPORT_DIR/service-update-report.md" ]]; then
+            cat "$REPORT_DIR/service-update-report.md"
+            cat "$REPORT_DIR/service-update-report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-update-report-gitlab-batch
+          path: ${{ env.REPORT_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
   update-child-services:
     name: Update Child Service / ${{ matrix.repo }}
     needs:
       - discover-repos
       - update-non-child-services
+      - update-gitlab-services
     if: >-
       ${{
         always()
@@ -516,6 +610,10 @@ jobs:
         && (
           needs.update-non-child-services.result == 'success'
           || needs.update-non-child-services.result == 'skipped'
+        )
+        && (
+          needs.update-gitlab-services.result == 'success'
+          || needs.update-gitlab-services.result == 'skipped'
         )
       }}
     runs-on: ubuntu-latest
@@ -825,6 +923,7 @@ jobs:
       - discover-repos
       - update-non-child-services
       - update-child-services
+      - update-gitlab-services
     if: always()
     runs-on: ubuntu-latest
 
@@ -858,5 +957,5 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --event "${{ github.event_name }}" \
             --sha "${{ github.sha }}" \
-            --workflow-result "discover=${{ needs.discover-repos.result }}, non-child=${{ needs.update-non-child-services.result }}, child=${{ needs.update-child-services.result }}" \
+            --workflow-result "discover=${{ needs.discover-repos.result }}, non-child=${{ needs.update-non-child-services.result }}, child=${{ needs.update-child-services.result }}, gitlab=${{ needs.update-gitlab-services.result }}" \
             --artifact-result "${{ steps.download-reports.outcome }}"

@@ -4,6 +4,7 @@ import argparse
 import base64
 import copy
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,8 @@ from packaging.version import InvalidVersion, Version
 README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
 README_MANAGED_SERVICES_HEADING = "## Managed services"
 EXCLUDED_README_REPOS = {"service"}
+GITLAB_REPOS = ("service-gitlab", "service-gitlab-runner")
+GITLAB_RUNNER_IMAGE = "registry.gitlab.com/gitlab-org/gitlab-runner"
 DOCKER_TOKEN_URL = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull"
 GHCR_TOKEN_URL = "https://ghcr.io/token?scope=repository:{repo}:pull"
 REGISTRY_TAGS_URL = "https://{registry}/v2/{repo}/tags/list?n=10000"
@@ -221,7 +224,7 @@ WODBY_TAG_RE = re.compile(
     r"-(?P<release>r(?:0|[1-9]\d*)|\d+(?:\.\d+)*)$"
 )
 IMAGE_RELEASE_ALIAS_RE = re.compile(r"^\S+ from image release (?P<release>r(?:0|[1-9]\d*))$", re.MULTILINE)
-EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)$")
+EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)(?P<variant>-[A-Za-z0-9._-]+)?$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
 CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+\.\d+)$")
@@ -688,6 +691,8 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
         if change_type == "helm_chart":
             chart = str(change.get("helm_chart") or "chart")
             lines.append(f"{prefix}Helm chart `{chart}` updated to `{after}`")
+        elif change_type == "application_tag":
+            lines.append(f"{prefix}GitLab application updated to `{after}`")
         elif change_type == "crd_helm_chart":
             chart = str(change.get("crd_chart") or change.get("helm_chart") or "CRD chart")
             lines.append(f"{prefix}CRD Helm chart `{chart}` updated to `{after}`")
@@ -1006,6 +1011,23 @@ class UpdateReportGenerator:
         self._wodby_chart_values_cache: dict[str, dict[str, Any]] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
         self._eol_product_cache: dict[str, dict[str, Any] | None] = {}
+
+    def get_public_service_repos(self) -> set[str]:
+        """Find active public managed repositories so catalog omissions fail discovery."""
+        repos: set[str] = set()
+        page = 1
+        while True:
+            url = f"https://api.github.com/orgs/{self.owner}/repos?type=public&per_page=100&page={page}"
+            payload = self.fetch(url, self.github_headers).json()
+            if not isinstance(payload, list):
+                raise RuntimeError("public repository discovery did not return a list")
+            for repo in payload:
+                name = str(repo.get("name") or "")
+                if name.startswith("service-") and repo.get("visibility") == "public" and not repo.get("archived"):
+                    repos.add(name)
+            if len(payload) < 100:
+                return repos
+            page += 1
 
     def git_ls_remote(self, *args: str) -> str:
         process = subprocess.run(
@@ -1945,6 +1967,143 @@ class UpdateReportGenerator:
             return self.get_tailscale_stable_versions()
         raise RuntimeError(f"unsupported fallback version source kind {kind!r}")
 
+    def get_helm_entries(self, source: str, chart: str) -> list[dict[str, Any]]:
+        """Read chart versions and their application versions from one cached index."""
+        if source not in self._helm_index_cache:
+            payload = yaml.safe_load(self.fetch(f"{source.rstrip('/')}/index.yaml").text)
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{source} chart index did not decode to a mapping")
+            self._helm_index_cache[source] = payload
+        return self._helm_index_cache[source].get("entries", {}).get(chart.rsplit("/", 1)[-1], [])
+
+    def check_gitlab_batch(self) -> dict[str, Any]:
+        """Plan GitLab and Runner together, keeping automatic upgrades on one minor line."""
+        batch: dict[str, Any] = {
+            "repos": list(GITLAB_REPOS), "status": "blocked", "reason": "",
+            "manifests": {}, "per_repo": {},
+        }
+        try:
+            manifests = {}
+            candidates = {}
+            current_apps = {}
+            for repo in GITLAB_REPOS:
+                text = self.get_repo_file(repo, "service.yml")
+                data = self.get_service_data(repo)
+                if text is None or not data or data.get("external") or data.get("from"):
+                    raise RuntimeError(f"{repo} needs a readable standalone service.yml")
+                batch["manifests"][repo] = hashlib.sha256(text.encode()).hexdigest()
+                manifests[repo] = data
+                options = data.get("options") or []
+                if len(options) != 1 or not isinstance(options[0], dict):
+                    raise RuntimeError(f"{repo} must have exactly one application version option")
+                helm = data.get("helm") or {}
+                expected_chart = "gitlab" if repo == GITLAB_REPOS[0] else "gitlab-runner"
+                if (
+                    helm.get("source") != "https://charts.gitlab.io"
+                    or str(helm.get("chart", "")).rsplit("/", 1)[-1] != expected_chart
+                ):
+                    raise RuntimeError(f"{repo} must use the official {expected_chart} chart")
+                entries = self.get_helm_entries(helm["source"], helm["chart"])
+                current_chart = parse_version(str(helm.get("version")))
+                current_entry = next(
+                    (entry for entry in entries if str(entry.get("version")) == str(helm.get("version"))),
+                    None,
+                )
+                app = parse_version(str((current_entry or {}).get("appVersion")))
+                if current_chart is None or app is None or app.is_prerelease or app.is_devrelease:
+                    raise RuntimeError(f"{repo} current chart/application version is missing or unstable")
+                option = options[0]
+                if str(option.get("version")) != str(app.major):
+                    raise RuntimeError(f"{repo} option version does not match its chart application major")
+                current_apps[repo] = app
+                by_app = {}
+                for entry in entries:
+                    chart_version = parse_version(str(entry.get("version")))
+                    app_version = parse_version(str(entry.get("appVersion")))
+                    if (
+                        chart_version is None or app_version is None
+                        or any(v.is_prerelease or v.is_devrelease for v in (chart_version, app_version))
+                    ):
+                        continue
+                    if chart_version < current_chart or app_version < app:
+                        continue
+                    # Minor transitions can require upgrade stops and completed migrations.
+                    if app_version.release[:2] != app.release[:2]:
+                        batch.setdefault("review_versions", {}).setdefault(repo, []).append(app_version)
+                        continue
+                    if chart_version.major != current_chart.major:
+                        continue
+                    if app_version not in by_app or chart_version > parse_version(str(by_app[app_version]["version"])):
+                        by_app[app_version] = entry
+                candidates[repo] = by_app
+            if len({app.release[:2] for app in current_apps.values()}) != 1:
+                raise RuntimeError("GitLab and Runner currently use different major/minor release lines; "
+                    "manual alignment required")
+            if self.get_service_images(manifests[GITLAB_REPOS[0]]):
+                raise RuntimeError("GitLab server images must be managed by the official chart")
+            runner = manifests[GITLAB_REPOS[1]]
+            if self.get_service_images(runner) != [GITLAB_RUNNER_IMAGE]:
+                raise RuntimeError("Runner must use the expected GitLab Runner image")
+            tags = set(self.get_image_tags(GITLAB_RUNNER_IMAGE))
+            candidates[GITLAB_REPOS[1]] = {
+                app: entry for app, entry in candidates[GITLAB_REPOS[1]].items()
+                if f"alpine-v{app}" in tags
+            }
+            if any(not entries for entries in candidates.values()):
+                raise RuntimeError("no compatible GitLab/Runner charts with a published Alpine Runner image were found")
+            batch["app_version"] = version_family_label(current_apps[GITLAB_REPOS[0]])
+            batch["application_versions"] = {}
+            for repo in GITLAB_REPOS:
+                target = max(candidates[repo])
+                batch["application_versions"][repo] = str(target)
+                data = manifests[repo]
+                helm = data["helm"]
+                option = data["options"][0]
+                # A manifest override must not silently roll back a newer application image.
+                configured = str(option.get("tag") or "")
+                prefix = "alpine-v" if repo == GITLAB_REPOS[1] else ""
+                if prefix and not configured.startswith(prefix):
+                    raise RuntimeError(f"{repo} must keep the Alpine Runner image variant")
+                configured_version = parse_version(configured.removeprefix(prefix))
+                if (
+                    configured_version is None or configured_version > target
+                    or configured_version.release[:2] != target.release[:2]
+                ):
+                    raise RuntimeError(f"{repo} configured application tag cannot safely advance to {target}")
+                entry = candidates[repo][target]
+                changes = []
+                if str(helm["version"]) != str(entry["version"]):
+                    notes = self.get_helm_chart_change_notes(
+                        helm["source"], helm["chart"], str(helm["version"]), str(entry["version"]),
+                    )
+                    changes.append(make_planned_change(
+                        "service.yml", "helm.version", "version", helm["version"], entry["version"],
+                        f"Update {repo} chart to {entry['version']} for application {target}",
+                        {"change_type": "helm_chart", "helm_chart": helm["chart"], "chart_change_notes": notes},
+                    ))
+                tag = f"{prefix}{target}"
+                if configured != tag:
+                    extra = {"change_type": "application_tag"}
+                    if prefix:
+                        extra = {
+                            "change_type": "image_tag", "image": GITLAB_RUNNER_IMAGE,
+                            "image_version": str(option["version"]),
+                        }
+                    changes.append(make_planned_change(
+                        "service.yml", f"options[version={option['version']}].tag", "tag", configured, tag,
+                        f"Update {repo} application tag to {tag}", extra,
+                    ))
+                batch["per_repo"][repo] = changes
+            batch["status"] = "ready"
+        except Exception as exc:
+            batch["reason"] = str(exc)
+            batch["per_repo"] = {}
+        batch["review"] = [
+            f"{repo}: application {max(versions)} requires upgrade-path review before changing the major/minor release line"
+            for repo, versions in sorted(batch.pop("review_versions", {}).items())
+        ]
+        return batch
+
     def get_helm_app_version(self, source: str | None, chart: str | None, version: str | None) -> str | None:
         if not source or not chart or not version or source.startswith("oci://"):
             return None
@@ -2483,16 +2642,25 @@ class UpdateReportGenerator:
         return pick(True, False) or pick(False, False)
 
     def latest_external_tag(self, wanted: str, published_tags: list[str], configured: str | None) -> str | None:
+        """Advance an external image without changing its configured variant or rolling back."""
         candidates: list[tuple[Version | None, int, str]] = []
+        current = EXTERNAL_TAG_RE.fullmatch(configured or "")
+        if configured and current is None:
+            return None
+        variant = current.group("variant") if current else None
+        current_version = parse_version(current.group("base")) if current else None
         prefer_v = configured.startswith("v") if configured else None
         for tag in published_tags:
             match = EXTERNAL_TAG_RE.match(tag)
             if not match:
                 continue
             base = match.group("base")
-            if not family_match(base, wanted):
+            parsed = parse_version(base)
+            if match.group("variant") != variant or not family_match(base, wanted):
                 continue
-            candidates.append((parse_version(base), 1 if match.group("prefix") == "v" else 0, tag))
+            if parsed is None or (current_version is not None and parsed < current_version):
+                continue
+            candidates.append((parsed, 1 if match.group("prefix") == "v" else 0, tag))
         if not candidates:
             return None
 
@@ -2780,16 +2948,19 @@ def load_service_repos(readme_path: Path, owner: str, repo_filter: str) -> list[
     repo_source_text = readme_managed_services_table_text(readme_text) or readme_text
     pattern = re.compile(README_SERVICE_REPO_RE_TEMPLATE.format(owner=re.escape(owner)), re.IGNORECASE)
     repos = sorted(set(pattern.findall(repo_source_text)) - EXCLUDED_README_REPOS)
-    if not repo_filter:
-        return repos
-    matcher = re.compile(repo_filter)
-    return [repo for repo in repos if matcher.search(repo)]
+    selected = repos if not repo_filter else [repo for repo in repos if re.search(repo_filter, repo)]
+    if set(selected) & set(GITLAB_REPOS):
+        if not set(GITLAB_REPOS) <= set(repos):
+            raise RuntimeError("GitLab update batch requires both GitLab repositories in the catalog")
+        selected = sorted(set(selected) | set(GITLAB_REPOS))
+    return selected
 
 
 def generate_report(args: argparse.Namespace) -> dict[str, Any]:
     readme_path = Path(args.readme).resolve()
     repos = load_service_repos(readme_path, args.owner, args.repo_filter)
     generator = UpdateReportGenerator(args.owner)
+    gitlab_batch = generator.check_gitlab_batch() if set(repos) & set(GITLAB_REPOS) else None
 
     results: list[RepoResult] = []
     missing_service_yml: list[str] = []
@@ -2884,7 +3055,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             helm_version = str(helm.get("version")) if helm and helm.get("version") is not None else None
             crd_charts = helm.get("crdCharts") if helm else None
             raw_crd_charts = raw_helm.get("crdCharts") if isinstance(raw_helm, dict) else None
-            expects_image = not external and not parent_name and service_type != "infrastructure"
+            expects_image = not external and not parent_name and service_type != "infrastructure" and repo not in GITLAB_REPOS
             expects_helm = not external and not parent_name
             expects_options = not external and not parent_name and service_type != "infrastructure"
             comparable = False
@@ -2897,6 +3068,19 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             repo_missing_expected_image = repo_missing_expected_image or (expects_image and not primary_image)
             repo_missing_expected_helm = repo_missing_expected_helm or (expects_helm and not helm)
             repo_missing_expected_options = repo_missing_expected_options or (expects_options and not options)
+
+            if repo in GITLAB_REPOS:
+                if gitlab_batch["status"] == "ready":
+                    changes = gitlab_batch["per_repo"][repo]
+                    planned_changes.extend(changes)
+                    updates.extend(change["description"] for change in changes)
+                    current.append(f"GitLab batch validated for application {gitlab_batch['app_version']}")
+                    comparable = True
+                else:
+                    warnings.append(f"GitLab batch blocked: {gitlab_batch['reason']}")
+                    repo_comparable = False
+                notifications.extend(gitlab_batch.get("review", []))
+                continue
 
             if parent_name:
                 try:
@@ -3306,6 +3490,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
             "no_options": no_options,
         },
         "per_repo": [result.to_dict() for result in results],
+        "update_batches": {"gitlab": gitlab_batch} if gitlab_batch else {},
     }
 
 
@@ -3342,6 +3527,16 @@ def render_markdown(report: dict[str, Any]) -> str:
     if "apply_failures" in report["totals"]:
         lines.append(f"- Repos with update apply failures: {report['totals'].get('apply_failures', 0)}")
     lines.append("")
+
+    for name, batch in report.get("update_batches", {}).items():
+        lines.extend([f"## Update Batch: {name}", "", f"- Status: {batch['status']}"])
+        lines.append(f"- Members: {', '.join(batch['repos'])}")
+        if batch.get("application_versions"):
+            for repo, version in batch["application_versions"].items():
+                lines.append(f"- {repo} application version: `{version}`")
+        if batch.get("reason"):
+            lines.append(f"- Blocked: {batch['reason']}")
+        lines.append("")
 
     planned_change_items = [
         item
