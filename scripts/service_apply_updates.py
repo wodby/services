@@ -14,6 +14,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import ScalarString
 
 from service_update_report import (
+    GITLAB_REPOS,
     UpdateReportGenerator,
     development_image_tag,
     latest_stable_semver_tag,
@@ -439,7 +440,10 @@ def commit_push_and_tag(
     branch: str,
     release: dict[str, Any],
     changed_files: list[str],
+    *,
+    prepare_only: bool = False,
 ) -> dict[str, Any]:
+    """Prepare a release locally, optionally deferring its push for batch preflight."""
     configure_git_identity(repo_dir)
 
     run_git(repo_dir, "add", *changed_files)
@@ -488,13 +492,19 @@ def commit_push_and_tag(
         description = str(release.get("description") or f"Release {tag}")
         create_annotated_tag(repo_dir, tag, description)
         tag_created = True
+        if prepare_only:
+            return {
+                "status": "prepared", "repo": repo, "branch": branch,
+                "commit": commit_sha, "tag": tag, "changed_files": changed_files if committed else [],
+                "message": f"Prepared local release {tag}; nothing has been pushed.",
+            }
         if committed:
             run_git(repo_dir, "push", "--atomic", "origin", f"HEAD:{branch}", f"refs/tags/{tag}")
         else:
             run_git(repo_dir, "push", "origin", f"refs/tags/{tag}")
         push_succeeded = True
     finally:
-        if tag_created and not push_succeeded:
+        if tag_created and not push_succeeded and not prepare_only:
             run_git(repo_dir, "tag", "-d", tag, check=False)
 
     if committed:
@@ -549,6 +559,9 @@ def apply_updates(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, A
         }
         item["apply_result"] = result
         return report, result
+
+    if args.repo in GITLAB_REPOS:
+        raise RuntimeError("GitLab services must be released together through service_apply_gitlab_batch.py")
 
     repo_dir = Path(args.repo_dir)
     branch = prepare_repo_for_apply(repo_dir)
