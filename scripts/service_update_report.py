@@ -5,10 +5,12 @@ import base64
 import copy
 import difflib
 import hashlib
+import io
 import json
 import os
 import re
 import subprocess
+import tarfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -59,6 +61,106 @@ EOL_PRODUCT_ALIASES = {
 }
 
 FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
+    "adminer": {
+        "label": "Adminer",
+        "source_label": "vrana/adminer GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "vrana",
+        "repo": "adminer",
+        "current_field": "version",
+        "comparison": "major",
+    },
+    "chatwoot": {
+        "label": "Chatwoot",
+        "source_label": "chatwoot/chatwoot GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "chatwoot",
+        "repo": "chatwoot",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+    "distribution": {
+        "label": "Distribution",
+        "source_label": "distribution/distribution GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "distribution",
+        "repo": "distribution",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+    "frps": {
+        "label": "FRP",
+        "source_label": "fatedier/frp GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "fatedier",
+        "repo": "frp",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+    "ghost": {
+        "label": "Ghost",
+        "source_label": "TryGhost/Ghost GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "TryGhost",
+        "repo": "Ghost",
+        "current_field": "version",
+        "comparison": "major",
+    },
+    "mongoku": {
+        "label": "Mongoku",
+        "source_label": "huggingface/Mongoku GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "huggingface",
+        "repo": "Mongoku",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+    "victoria-metrics": {
+        "label": "VictoriaMetrics",
+        "source_label": "VictoriaMetrics/VictoriaMetrics GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "VictoriaMetrics",
+        "repo": "VictoriaMetrics",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+    "vllm": {
+        "label": "vLLM",
+        "source_label": "vllm-project/vllm GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "vllm-project",
+        "repo": "vllm",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
+    "supabase": {
+        "label": "Supabase self-hosted",
+        "source_label": "supabase/supabase GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "supabase",
+        "repo": "supabase",
+        "current_field": "version",
+        "comparison": "minor_family",
+        "tag_prefix": "self-hosted/v",
+    },
+    "supabase-postgres": {
+        "label": "Supabase PostgreSQL",
+        "source_label": "supabase/postgres published image tags",
+        "report_only": True,
+        "kind": "image_tags",
+        "image": "supabase/postgres",
+        "current_field": "version",
+        "comparison": "major",
+    },
     "3xui": {
         "label": "3X UI",
         "source_label": "MHSanaei/3x-ui GitHub tags",
@@ -227,11 +329,11 @@ IMAGE_RELEASE_ALIAS_RE = re.compile(r"^\S+ from image release (?P<release>r(?:0|
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)(?P<variant>-[A-Za-z0-9._-]+)?$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
-CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+\.\d+)$")
+CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+(?:\.\d+)?)$")
 BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image (?:stability|revision) tag updated to (?P<tag>\S+)", re.IGNORECASE)
 FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):", re.MULTILINE)
 README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
-SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+){0,2})(?:p(?P<portable>\d+))?$")
+SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+)*)(?:p(?P<portable>\d+))?$")
 TAILSCALE_STABLE_OPTION_RE = re.compile(r'<option value="(?P<version>\d+\.\d+\.\d+)"')
 GITHUB_REPO_URL_RE = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
@@ -632,7 +734,7 @@ def parse_caret_constraint(value: Any) -> Version | None:
 def caret_upper_bound(base: Version) -> Version:
     if base.major > 0:
         return Version(f"{base.major + 1}.0.0")
-    if base.minor > 0:
+    if base.minor > 0 or len(base.release) == 2:
         return Version(f"0.{base.minor + 1}.0")
     return Version(f"0.0.{base.micro + 1}")
 
@@ -691,6 +793,12 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
         if change_type == "helm_chart":
             chart = str(change.get("helm_chart") or "chart")
             lines.append(f"{prefix}Helm chart `{chart}` updated to `{after}`")
+        elif change_type == "container_image":
+            lines.append(f"{prefix}Supabase component image updated to `{after}`")
+        elif change_type == "bootstrap_image":
+            lines.append(f"{prefix}Supabase bootstrap image updated to `{after}`")
+        elif change_type == "supabase_bundle":
+            lines.append(f"{prefix}Supabase self-hosted bundle updated to `{after}`")
         elif change_type == "application_tag":
             lines.append(f"{prefix}GitLab application updated to `{after}`")
         elif change_type == "crd_helm_chart":
@@ -1002,6 +1110,8 @@ class UpdateReportGenerator:
         self._image_change_notes_cache: dict[tuple[str, str | None, str, str | None], list[dict[str, Any]]] = {}
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
         self._oci_chart_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._oci_manifest_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._oci_chart_values_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._oci_pull_headers_cache: dict[tuple[str, str], dict[str, str]] = {}
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
@@ -1960,7 +2070,11 @@ class UpdateReportGenerator:
     def get_fallback_version_source_values(self, source: dict[str, Any]) -> list[str] | set[str]:
         kind = str(source.get("kind") or "")
         if kind == "github_tags":
-            return self.get_github_tags(str(source["owner"]), str(source["repo"]))
+            tags = self.get_github_tags(str(source["owner"]), str(source["repo"]))
+            prefix = str(source.get("tag_prefix") or "")
+            if prefix:
+                return {tag[len(prefix):] for tag in tags if tag.startswith(prefix)}
+            return tags
         if kind == "image_tags":
             return self.get_image_tags(str(source["image"]))
         if kind == "tailscale_stable":
@@ -2229,6 +2343,7 @@ class UpdateReportGenerator:
                 response = self.session.get(manifest_url, headers=request_headers, timeout=60)
         response.raise_for_status()
         manifest = response.json()
+        self._oci_manifest_cache[cache_key] = manifest
         config = manifest.get("config") or {}
         digest = str(config.get("digest") or "")
         if not digest:
@@ -2246,6 +2361,55 @@ class UpdateReportGenerator:
             raise RuntimeError(f"OCI chart {reference}:{version} config did not decode to a mapping")
         self._oci_chart_metadata_cache[cache_key] = metadata
         return metadata
+
+    def get_oci_chart_values(self, reference: str, version: str) -> dict[str, Any]:
+        """Read values from the exact published chart layer without extracting its archive."""
+        cache_key = (reference, version)
+        if cache_key in self._oci_chart_values_cache:
+            return self._oci_chart_values_cache[cache_key]
+        metadata = self.get_oci_chart_metadata(reference, version)
+        manifest = self._oci_manifest_cache[cache_key]
+        layers = [
+            layer for layer in manifest.get("layers") or []
+            if layer.get("mediaType") == "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+        ]
+        if len(layers) != 1:
+            raise RuntimeError("OCI chart must have exactly one Helm content layer")
+        digest = str(layers[0].get("digest") or "")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise RuntimeError("OCI chart content layer has no valid SHA-256 digest")
+        parsed = urlparse(reference)
+        registry, repo = parsed.netloc, parsed.path.lstrip("/")
+        if registry in ("docker.io", "index.docker.io"):
+            registry = "registry-1.docker.io"
+        response = self.fetch(
+            f"https://{registry}/v2/{repo}/blobs/{digest}",
+            self._oci_pull_headers_cache.get((registry, repo)) or {},
+        )
+        if hashlib.sha256(response.content).hexdigest() != digest.removeprefix("sha256:"):
+            raise RuntimeError("OCI chart content digest verification failed")
+        with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as archive:
+            decoded = {}
+            for filename in ("Chart.yaml", "values.yaml"):
+                name = f"{metadata['name']}/{filename}"
+                members = [member for member in archive.getmembers() if member.name == name]
+                if len(members) != 1 or not members[0].isfile():
+                    raise RuntimeError(f"OCI chart must contain exactly one regular {filename}")
+                member = archive.extractfile(members[0])
+                decoded[filename] = yaml.safe_load(member.read())
+                if not isinstance(decoded[filename], dict):
+                    raise RuntimeError(f"OCI chart {filename} must be a mapping")
+        for key in ("name", "version", "appVersion"):
+            if str(decoded["Chart.yaml"].get(key)) != str(metadata.get(key)):
+                raise RuntimeError(f"OCI chart archive/config disagree on {key}")
+        self._oci_chart_values_cache[cache_key] = decoded["values.yaml"]
+        return decoded["values.yaml"]
+
+    def check_supabase_updates(self, data: dict[str, Any], manifest_path: str, prefix: str) -> dict[str, Any]:
+        """Use a complete published chart bundle for Supabase's independently pinned images."""
+        from supabase_updates import check_updates
+
+        return check_updates(self, data, manifest_path, prefix, make_planned_change)
 
     def get_helm_chart_change_notes(
         self,
@@ -3139,6 +3303,17 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     warnings.append(
                         f"{prefix}{fallback_source.get('label', 'fallback source')} version source lookup failed: {exc}"
                     )
+
+            if repo == "service-supabase":
+                bundle_result = generator.check_supabase_updates(raw_service_data, manifest_path, prefix)
+                updates.extend(bundle_result["updates"])
+                current.extend(bundle_result["current"])
+                notifications.extend(bundle_result["notifications"])
+                warnings.extend(bundle_result["warnings"])
+                planned_changes.extend(bundle_result["planned_changes"])
+                dry_run_changes.extend(bundle_result["dry_run_changes"])
+                repo_comparable = repo_comparable and not bool(bundle_result["warnings"])
+                continue
 
             if len(images) > 1:
                 warnings.append(
