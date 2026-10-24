@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -23,6 +24,10 @@ from service_update_report import (
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
+CONTAINER_IMAGE_PATH_RE = re.compile(
+    r"^workloads\[name=(?P<workload>[A-Za-z0-9_-]+)]"
+    r"\.containers\[name=(?P<container>[A-Za-z0-9_-]+)]\.image$"
+)
 CRD_CHART_PATH_RE = re.compile(r"^helm\.crdCharts\[name=(?P<name>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
 YAML_RT = YAML()
 YAML_RT.preserve_quotes = True
@@ -171,6 +176,34 @@ def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
         helm["version"] = replacement_value(current, after)
         return
 
+    match = CONTAINER_IMAGE_PATH_RE.fullmatch(path)
+    if match and key == "image":
+        workloads = [
+            workload for workload in data.get("workloads") or []
+            if workload.get("name") == match.group("workload")
+        ]
+        if len(workloads) != 1:
+            raise RuntimeError(f"{path} must identify exactly one workload")
+        containers = [
+            container for container in workloads[0].get("containers") or []
+            if container.get("name") == match.group("container")
+        ]
+        if len(containers) != 1:
+            raise RuntimeError(f"{path} must identify exactly one container")
+        current = containers[0].get("image")
+        if normalize(current) != expected_before:
+            raise RuntimeError(f"{path} changed since report generation")
+        containers[0]["image"] = replacement_value(current, after)
+        return
+
+    if path == "helm.values[name=bootstrap.image].value" and key == "value":
+        values = (data.get("helm") or {}).get("values") or []
+        matches = [value for value in values if value.get("name") == "bootstrap.image"]
+        if len(matches) != 1 or normalize(matches[0].get("value")) != expected_before:
+            raise RuntimeError("Supabase bootstrap override changed since report generation")
+        matches[0]["value"] = replacement_value(matches[0]["value"], after)
+        return
+
     match = CRD_CHART_PATH_RE.match(path)
     if match and key == match.group("field"):
         helm = data.get("helm")
@@ -296,7 +329,11 @@ def validate_development_image_changes(data: dict[str, Any], manifest_path: str)
             )
 
 
-def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]) -> list[str]:
+def apply_manifest_changes(
+    repo_dir: Path,
+    planned_changes: list[dict[str, Any]],
+    generator: UpdateReportGenerator | None = None,
+) -> list[str]:
     changed_files: list[str] = []
     changes_by_file: dict[str, list[dict[str, Any]]] = {}
     for change in planned_changes:
@@ -315,9 +352,27 @@ def apply_manifest_changes(repo_dir: Path, planned_changes: list[dict[str, Any]]
             raise RuntimeError(f"{manifest_path} is a child service manifest; refusing to apply option EOL updates")
 
         validate_helm_crd_chart_changes(data, changes, manifest_path)
+        before_data = copy.deepcopy(data) if data.get("name") == "supabase" else None
 
         for change in changes:
             set_yaml_value(data, change)
+
+        if data.get("name") == "supabase":
+            from supabase_updates import (
+                chart_bundle,
+                upgrade_review_reasons,
+                validate_manifest_bundle,
+                validate_bundle_images,
+            )
+            source = generator or UpdateReportGenerator("wodby")
+            previous = chart_bundle(source, str((before_data.get("helm") or {}).get("version")))
+            validate_manifest_bundle(before_data, previous)
+            bundle = chart_bundle(source, str((data.get("helm") or {}).get("version")))
+            validate_manifest_bundle(data, bundle)
+            validate_bundle_images(source, bundle)
+            actions = upgrade_review_reasons(source, previous, bundle)
+            if actions:
+                raise RuntimeError("Supabase upgrade requires manual review: " + "; ".join(actions))
 
         validate_development_image_changes(data, manifest_path)
 
@@ -387,7 +442,7 @@ def validate_planned_image_tags(
     image_changes = [
         change
         for change in planned_changes
-        if isinstance(change, dict) and change.get("change_type") == "image_tag"
+        if isinstance(change, dict) and change.get("change_type") in ("image_tag", "container_image")
     ]
     if not image_changes:
         return
@@ -395,9 +450,13 @@ def validate_planned_image_tags(
     tag_source = generator or UpdateReportGenerator(owner)
     for change in image_changes:
         image = normalize(change.get("image"))
-        tag = normalize(change.get("after"))
+        tag = normalize(
+            change.get("image_tag") if change.get("change_type") == "container_image" else change.get("after")
+        )
         if not image or not tag:
             raise RuntimeError("planned image tag change must include image and target tag")
+        if change.get("change_type") == "container_image" and normalize(change.get("after")) != f"{image}:{tag}":
+            raise RuntimeError("planned container image differs from its validated image/tag metadata")
 
         published_tags = set(tag_source.get_image_tags(image))
         if tag not in published_tags:

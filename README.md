@@ -41,6 +41,18 @@ It prepares both repositories before publishing either release. Minor and major
 application upgrades require review of GitLab's
 [upgrade path](https://docs.gitlab.com/update/upgrade_paths/).
 
+Supabase updates use all eight component images from one published Wodby chart,
+checked against that chart's exact upstream self-hosted release. The chart,
+application option, component images, and any Studio bootstrap override advance
+together. Updates that change the database major, roll back an image, or require
+upstream manual steps appear as review-only diffs. New upstream releases without
+a compatible published chart are reported for review; individual components are
+not advanced independently.
+
+New application release lines are reported for manual review, using upstream
+tags or published image versions when end-of-life data has no version source.
+Missing end-of-life dates still require review; the updater does not invent them.
+
 Each repository's branch and release tag are pushed atomically. GitHub cannot
 publish multiple repositories atomically. If a later batch push fails, the
 report preserves successful releases; rerun the workflow to plan the remaining
