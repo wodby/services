@@ -97,6 +97,7 @@ def chart_bundle(generator: Any, version: str) -> dict:
         "images": images,
         "bootstrap": bootstrap,
         "db_major": db_major,
+        "db_image": db_image,
     }
 
 
@@ -182,6 +183,10 @@ def upgrade_review_reasons(generator: Any, current: dict, target: dict) -> list[
         actions.append("Supabase application release-line changes require compatibility review")
     if target["db_major"] != current["db_major"]:
         actions.append("Supabase database major changes require a manual database upgrade")
+    elif target["db_image"] != current["db_image"]:
+        actions.append(
+            "Supabase upstream database image changed; verify the linked Supabase PostgreSQL service before upgrading"
+        )
     for key, image in target["images"].items():
         previous = current["images"][key]
         if previous == image:

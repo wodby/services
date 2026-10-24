@@ -284,6 +284,16 @@ class SupabaseBundleTest(unittest.TestCase):
         self.assertIn("manual database upgrade", " ".join(result["notifications"]))
         self.apply(result["dry_run_changes"], "manual database upgrade")
 
+    def test_changed_upstream_database_image_within_the_same_major_requires_review(self):
+        compose = yaml.safe_load(self.generator.files[("docker/docker-compose.yml", "self-hosted/v0.8.2")])
+        compose["services"]["db"]["image"] = "supabase/postgres:17.7.1.001"
+        self.generator.files[("docker/docker-compose.yml", "self-hosted/v0.8.2")] = yaml.safe_dump(compose)
+        result = plan(self.generator)
+        self.assertEqual(result["planned_changes"], [])
+        self.assertTrue(result["dry_run_changes"])
+        self.assertIn("verify the linked Supabase PostgreSQL service", " ".join(result["notifications"]))
+        self.apply(result["dry_run_changes"], "requires manual review")
+
     def test_new_chart_component_requires_a_matching_service_manifest_review(self):
         self.generator.releases["0.1.2"][1]["components"]["additional-service"] = {}
         result = plan(self.generator)

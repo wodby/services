@@ -44,8 +44,8 @@ application upgrades require review of GitLab's
 Supabase updates use all eight component images from one published Wodby chart,
 checked against that chart's exact upstream self-hosted release. The chart,
 application option, component images, and any Studio bootstrap override advance
-together. Updates that change the database major, roll back an image, or require
-upstream manual steps appear as review-only diffs. New upstream releases without
+together. Updates that change the upstream database image, roll back an image, or
+require upstream manual steps appear as review-only diffs. New upstream releases without
 a compatible published chart are reported for review; individual components are
 not advanced independently.
 
