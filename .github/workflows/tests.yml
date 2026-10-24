@@ -3,6 +3,8 @@ name: Test service maintenance scripts
 on:
   pull_request:
     paths:
+      - README.md
+      - .github/workflows/service-update-report.yml
       - scripts/**
       - tests/**
       - .github/workflows/tests.yml
