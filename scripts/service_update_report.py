@@ -20,6 +20,8 @@ from urllib.parse import quote, urljoin, urlparse
 import requests
 import yaml
 from packaging.version import InvalidVersion, Version
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
@@ -39,6 +41,11 @@ OCI_IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 ENDOFLIFE_PRODUCTS_URL = "https://endoflife.date/api/v1/products"
 ENDOFLIFE_PRODUCT_URL = "https://endoflife.date/api/v1/products/{product}/"
 TAILSCALE_STABLE_URL = "https://pkgs.tailscale.com/stable/"
+# Dropped connections, timeouts, rate limits, and server errors are retried with exponential backoff before a
+# request fails, so a single transient GitHub, registry, or endoflife.date failure does not abort a whole run.
+HTTP_RETRY_ATTEMPTS = 4
+HTTP_RETRY_BACKOFF_FACTOR = 2
+HTTP_RETRY_STATUS_CODES = (429, 500, 502, 503, 504)
 SSH_SIGNATURE_BLOCK_RE = re.compile(
     r"(?ms)^[ \t]*-----BEGIN SSH SIGNATURE-----\r?\n"
     r".*?^[ \t]*-----END SSH SIGNATURE-----[ \t]*(?:\r?\n)?"
@@ -1087,10 +1094,31 @@ class RepoResult:
         }
 
 
+def create_http_session() -> requests.Session:
+    """Return a session that retries transient failures of the read-only GET requests this script makes.
+
+    After the last attempt the final response is returned instead of raising, so callers keep handling status codes
+    such as 403 and 404 themselves.
+    """
+    retry = Retry(
+        total=HTTP_RETRY_ATTEMPTS,
+        backoff_factor=HTTP_RETRY_BACKOFF_FACTOR,
+        status_forcelist=HTTP_RETRY_STATUS_CODES,
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 class UpdateReportGenerator:
     def __init__(self, owner: str) -> None:
         self.owner = owner
-        self.session = requests.Session()
+        self.session = create_http_session()
         self.session.headers["Accept"] = "application/vnd.github+json"
         self.github_headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
         token = (
