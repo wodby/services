@@ -128,6 +128,16 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
         "current_field": "version",
         "comparison": "minor_family",
     },
+    "t3code": {
+        "label": "T3 Code",
+        "source_label": "pingdotgg/t3code GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "pingdotgg",
+        "repo": "t3code",
+        "current_field": "version",
+        "comparison": "major",
+    },
     "victoria-metrics": {
         "label": "VictoriaMetrics",
         "source_label": "VictoriaMetrics/VictoriaMetrics GitHub tags",
