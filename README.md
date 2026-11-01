@@ -237,4 +237,5 @@ user-created application stacks.
 | Service | Repository |
 | --- | --- |
 | OpenClaw | [wodby/service-openclaw](https://github.com/wodby/service-openclaw) |
+| T3 Code | [wodby/service-t3code](https://github.com/wodby/service-t3code) |
 | vLLM (preview) | [wodby/service-vllm](https://github.com/wodby/service-vllm) |
