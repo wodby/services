@@ -91,6 +91,7 @@ Before publishing a service for others to use, review:
 | Drupal PHP | [wodby/service-drupal-php](https://github.com/wodby/service-drupal-php) |
 | WordPress PHP | [wodby/service-wordpress-php](https://github.com/wodby/service-wordpress-php) |
 | Laravel PHP | [wodby/service-laravel-php](https://github.com/wodby/service-laravel-php) |
+| Symfony PHP | [wodby/service-symfony-php](https://github.com/wodby/service-symfony-php) |
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
