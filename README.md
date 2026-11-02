@@ -103,6 +103,8 @@ Before publishing a service for others to use, review:
 | Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
 | Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
+| .NET | [wodby/service-dotnet](https://github.com/wodby/service-dotnet) |
+| ASP.NET Core | [wodby/service-aspnetcore](https://github.com/wodby/service-aspnetcore) |
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | Angular | [wodby/service-angular](https://github.com/wodby/service-angular) |

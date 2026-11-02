@@ -52,6 +52,7 @@ SSH_SIGNATURE_BLOCK_RE = re.compile(
 )
 
 EOL_PRODUCT_ALIASES = {
+    "aspnetcore": "dotnet",
     "cloud-mariadb": "mariadb",
     "cloud-mysql": "mysql",
     "cloud-postgres": "postgresql",
