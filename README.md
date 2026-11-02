@@ -141,6 +141,7 @@ Before publishing a service for others to use, review:
 | Tailscale | [wodby/service-tailscale](https://github.com/wodby/service-tailscale) |
 | 3X UI | [wodby/service-3xui](https://github.com/wodby/service-3xui) |
 | FRP Server | [wodby/service-frps](https://github.com/wodby/service-frps) |
+| RustDesk Server | [wodby/service-rustdesk](https://github.com/wodby/service-rustdesk) |
 
 ### Backend platforms
 

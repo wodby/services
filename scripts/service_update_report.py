@@ -129,6 +129,16 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
         "current_field": "version",
         "comparison": "minor_family",
     },
+    "rustdesk": {
+        "label": "RustDesk Server",
+        "source_label": "rustdesk/rustdesk-server GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "rustdesk",
+        "repo": "rustdesk-server",
+        "current_field": "version",
+        "comparison": "major",
+    },
     "t3code": {
         "label": "T3 Code",
         "source_label": "pingdotgg/t3code GitHub tags",
