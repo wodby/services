@@ -57,6 +57,7 @@ EOL_PRODUCT_ALIASES = {
     "cloud-postgres": "postgresql",
     "httpd": "apache-http-server",
     "matomo": "php",
+    "moodle": "php",
     "nextjs": "nodejs",
     "nginx-proxy": "nginx",
     "node": "nodejs",
