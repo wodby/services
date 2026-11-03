@@ -57,6 +57,7 @@ EOL_PRODUCT_ALIASES = {
     "cloud-mysql": "mysql",
     "cloud-postgres": "postgresql",
     "httpd": "apache-http-server",
+    "java": "eclipse-temurin",
     "matomo": "php",
     "moodle": "php",
     "nextjs": "nodejs",
@@ -65,6 +66,7 @@ EOL_PRODUCT_ALIASES = {
     "php-httpd": "apache-http-server",
     "postgis": "postgresql",
     "postgres": "postgresql",
+    "spring-boot": "eclipse-temurin",
     "varnish": "vinyl-cache",
     "vinyl": "vinyl-cache",
 }
