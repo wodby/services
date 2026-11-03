@@ -104,6 +104,7 @@ Before publishing a service for others to use, review:
 | Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
 | Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
+| Rust | [wodby/service-rust](https://github.com/wodby/service-rust) |
 | Java | [wodby/service-java](https://github.com/wodby/service-java) |
 | Spring Boot | [wodby/service-spring-boot](https://github.com/wodby/service-spring-boot) |
 | Kotlin | [wodby/service-kotlin](https://github.com/wodby/service-kotlin) |
