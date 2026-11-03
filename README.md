@@ -91,6 +91,7 @@ Before publishing a service for others to use, review:
 | Drupal PHP | [wodby/service-drupal-php](https://github.com/wodby/service-drupal-php) |
 | WordPress PHP | [wodby/service-wordpress-php](https://github.com/wodby/service-wordpress-php) |
 | Laravel PHP | [wodby/service-laravel-php](https://github.com/wodby/service-laravel-php) |
+| Symfony PHP | [wodby/service-symfony-php](https://github.com/wodby/service-symfony-php) |
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
@@ -104,6 +105,11 @@ Before publishing a service for others to use, review:
 | Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
 | Rust | [wodby/service-rust](https://github.com/wodby/service-rust) |
+| Java | [wodby/service-java](https://github.com/wodby/service-java) |
+| Spring Boot | [wodby/service-spring-boot](https://github.com/wodby/service-spring-boot) |
+| Kotlin | [wodby/service-kotlin](https://github.com/wodby/service-kotlin) |
+| .NET | [wodby/service-dotnet](https://github.com/wodby/service-dotnet) |
+| ASP.NET Core | [wodby/service-aspnetcore](https://github.com/wodby/service-aspnetcore) |
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | Angular | [wodby/service-angular](https://github.com/wodby/service-angular) |
