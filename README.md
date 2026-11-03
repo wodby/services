@@ -119,6 +119,7 @@ Before publishing a service for others to use, review:
 | Dagster | [wodby/service-dagster](https://github.com/wodby/service-dagster) |
 | Chatwoot | [wodby/service-chatwoot](https://github.com/wodby/service-chatwoot) |
 | Mattermost | [wodby/service-mattermost](https://github.com/wodby/service-mattermost) |
+| Metabase | [wodby/service-metabase](https://github.com/wodby/service-metabase) |
 | Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
 
 ### Web and edge
