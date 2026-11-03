@@ -157,6 +157,8 @@ Before publishing a service for others to use, review:
 | --- | --- |
 | GitLab Community Edition | [wodby/service-gitlab](https://github.com/wodby/service-gitlab) |
 | GitLab Runner | [wodby/service-gitlab-runner](https://github.com/wodby/service-gitlab-runner) |
+| Gitea | [wodby/service-gitea](https://github.com/wodby/service-gitea) |
+| Forgejo | [wodby/service-forgejo](https://github.com/wodby/service-forgejo) |
 | Supabase | [wodby/service-supabase](https://github.com/wodby/service-supabase) |
 
 ### Data, search, and messaging
