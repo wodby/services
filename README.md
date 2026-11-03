@@ -106,6 +106,8 @@ Before publishing a service for others to use, review:
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
 | Java | [wodby/service-java](https://github.com/wodby/service-java) |
 | Spring Boot | [wodby/service-spring-boot](https://github.com/wodby/service-spring-boot) |
+| .NET | [wodby/service-dotnet](https://github.com/wodby/service-dotnet) |
+| ASP.NET Core | [wodby/service-aspnetcore](https://github.com/wodby/service-aspnetcore) |
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | Angular | [wodby/service-angular](https://github.com/wodby/service-angular) |
