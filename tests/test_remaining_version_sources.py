@@ -23,6 +23,7 @@ class RemainingVersionSourcesTest(unittest.TestCase):
             "frps": ("0.69", "v0.70.0"),
             "ghost": ("6", "v7.0.0"),
             "mongoku": ("2.11", "v2.12.0"),
+            "open-webui": ("0.13", "v0.14.0"),
             "supabase": ("0.8.1", "0.9.0"),
             "supabase-postgres": ("17", "18.1.0.001"),
             "victoria-metrics": ("1.150", "v1.151.0"),

@@ -152,6 +152,16 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
         "current_field": "version",
         "comparison": "major",
     },
+    "open-webui": {
+        "label": "Open WebUI",
+        "source_label": "open-webui/open-webui GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "open-webui",
+        "repo": "open-webui",
+        "current_field": "version",
+        "comparison": "minor_family",
+    },
     "t3code": {
         "label": "T3 Code",
         "source_label": "pingdotgg/t3code GitHub tags",
