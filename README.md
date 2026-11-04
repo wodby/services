@@ -95,6 +95,7 @@ Before publishing a service for others to use, review:
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
+| Odoo | [wodby/service-odoo](https://github.com/wodby/service-odoo) |
 | Ghost | [wodby/service-ghost](https://github.com/wodby/service-ghost) |
 | Python | [wodby/service-python](https://github.com/wodby/service-python) |
 | Django | [wodby/service-django](https://github.com/wodby/service-django) |
@@ -138,6 +139,7 @@ Before publishing a service for others to use, review:
 | Nginx for Laravel | [wodby/service-laravel-nginx](https://github.com/wodby/service-laravel-nginx) |
 | Nginx for Matomo | [wodby/service-matomo-nginx](https://github.com/wodby/service-matomo-nginx) |
 | Nginx for Moodle | [wodby/service-moodle-nginx](https://github.com/wodby/service-moodle-nginx) |
+| Nginx for Odoo | [wodby/service-odoo-nginx](https://github.com/wodby/service-odoo-nginx) |
 | Apache HTTPD | [wodby/service-httpd](https://github.com/wodby/service-httpd) |
 | Apache HTTPD for PHP | [wodby/service-php-httpd](https://github.com/wodby/service-php-httpd) |
 | Vinyl | [wodby/service-vinyl](https://github.com/wodby/service-vinyl) |
