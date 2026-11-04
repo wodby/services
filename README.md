@@ -223,6 +223,8 @@ Before publishing a service for others to use, review:
 | OpenSearch Dashboards | [wodby/service-opensearch-dashboards](https://github.com/wodby/service-opensearch-dashboards) |
 | Grafana Loki | [wodby/service-loki](https://github.com/wodby/service-loki) |
 | VictoriaMetrics | [wodby/service-victoria-metrics](https://github.com/wodby/service-victoria-metrics) |
+| Grafana Tempo | [wodby/service-tempo](https://github.com/wodby/service-tempo) |
+| OpenTelemetry Collector | [wodby/service-opentelemetry-collector](https://github.com/wodby/service-opentelemetry-collector) |
 
 ### Mail
 
