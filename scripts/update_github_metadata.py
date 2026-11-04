@@ -72,6 +72,16 @@ def service_type_topics(service_type: str) -> set[str]:
     }.get(service_type, set())
 
 
+def catalog_page_url(section: str, manifests: list[dict[str, Any]]) -> str:
+    """Link a repository to the wodby.com page of its first indexed manifest.
+
+    Repositories with several manifests (such as Drupal 11 and 10) link the first
+    one. Without a named manifest, fall back to the catalog index.
+    """
+    name = next((str(m["name"]) for m in manifests if m.get("name")), "")
+    return f"https://wodby.com/{section}/{name}" if name else f"https://wodby.com/{section}"
+
+
 def desired_metadata(repo_name: str, current_topics: list[str]) -> dict[str, Any]:
     del current_topics
     repo_dir = WORKSPACE / repo_name
@@ -115,7 +125,7 @@ def desired_metadata(repo_name: str, current_topics: list[str]) -> dict[str, Any
 
     return {
         "description": description[:160],
-        "homepage": "https://wodby.com/services",
+        "homepage": catalog_page_url("services", manifests),
         "topics": sorted(selected_topics),
     }
 
