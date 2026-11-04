@@ -132,6 +132,16 @@ FALLBACK_VERSION_SOURCES: dict[str, dict[str, Any]] = {
         "current_field": "version",
         "comparison": "minor_family",
     },
+    "netbird": {
+        "label": "NetBird",
+        "source_label": "netbirdio/netbird GitHub tags",
+        "report_only": True,
+        "kind": "github_tags",
+        "owner": "netbirdio",
+        "repo": "netbird",
+        "current_field": "version",
+        "comparison": "major",
+    },
     "rustdesk": {
         "label": "RustDesk Server",
         "source_label": "rustdesk/rustdesk-server GitHub tags",
