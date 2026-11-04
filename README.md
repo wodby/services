@@ -124,6 +124,7 @@ Before publishing a service for others to use, review:
 | Chatwoot | [wodby/service-chatwoot](https://github.com/wodby/service-chatwoot) |
 | Mattermost | [wodby/service-mattermost](https://github.com/wodby/service-mattermost) |
 | Metabase | [wodby/service-metabase](https://github.com/wodby/service-metabase) |
+| n8n | [wodby/service-n8n](https://github.com/wodby/service-n8n) |
 | Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
 
 ### Web and edge
