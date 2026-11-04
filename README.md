@@ -93,6 +93,7 @@ Before publishing a service for others to use, review:
 | Laravel PHP | [wodby/service-laravel-php](https://github.com/wodby/service-laravel-php) |
 | Symfony PHP | [wodby/service-symfony-php](https://github.com/wodby/service-symfony-php) |
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
+| Mautic | [wodby/service-mautic](https://github.com/wodby/service-mautic) |
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
 | Odoo | [wodby/service-odoo](https://github.com/wodby/service-odoo) |
