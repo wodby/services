@@ -113,6 +113,10 @@ Before publishing a service for others to use, review:
 | Node.js | [wodby/service-node](https://github.com/wodby/service-node) |
 | Next.js | [wodby/service-nextjs](https://github.com/wodby/service-nextjs) |
 | TanStack Start | [wodby/service-tanstack-start](https://github.com/wodby/service-tanstack-start) |
+| Nuxt | [wodby/service-nuxt](https://github.com/wodby/service-nuxt) |
+| SvelteKit | [wodby/service-sveltekit](https://github.com/wodby/service-sveltekit) |
+| Astro | [wodby/service-astro](https://github.com/wodby/service-astro) |
+| Strapi | [wodby/service-strapi](https://github.com/wodby/service-strapi) |
 | Angular | [wodby/service-angular](https://github.com/wodby/service-angular) |
 | React | [wodby/service-react](https://github.com/wodby/service-react) |
 | Vue | [wodby/service-vue](https://github.com/wodby/service-vue) |
