@@ -184,6 +184,7 @@ Before publishing a service for others to use, review:
 | Solr | [wodby/service-solr](https://github.com/wodby/service-solr) |
 | Elasticsearch | [wodby/service-elasticsearch](https://github.com/wodby/service-elasticsearch) |
 | OpenSearch | [wodby/service-opensearch](https://github.com/wodby/service-opensearch) |
+| Meilisearch | [wodby/service-meilisearch](https://github.com/wodby/service-meilisearch) |
 | ClickHouse | [wodby/service-clickhouse](https://github.com/wodby/service-clickhouse) |
 | Apache Kafka | [wodby/service-kafka](https://github.com/wodby/service-kafka) |
 | Apache Spark | [wodby/service-spark](https://github.com/wodby/service-spark) |
