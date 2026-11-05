@@ -129,6 +129,14 @@ Keep this repository-specific guidance.
             "nginx",
         )
 
+    def test_prebuilt_applications_use_their_own_eol_data(self) -> None:
+        # Moodle and Matomo options are application versions, not PHP versions.
+        generator = FakeGenerator()
+        generator._eol_product_index_cache = {"moodle": "moodle", "matomo": "matomo", "php": "php"}
+
+        self.assertEqual(generator.resolve_eol_product_name("service-moodle", "moodle"), "moodle")
+        self.assertEqual(generator.resolve_eol_product_name("service-matomo", "matomo"), "matomo")
+
     def test_build_boilerplate_branch_and_dockerfile_are_current(self) -> None:
         generator = FakeGenerator()
         generator.repo_files[("service-node", "Dockerfile")] = "FROM node\n"
