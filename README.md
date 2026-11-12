@@ -98,6 +98,7 @@ Before publishing a service for others to use, review:
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
 | Odoo | [wodby/service-odoo](https://github.com/wodby/service-odoo) |
+| Odoo (buildable) | [wodby/service-odoo-buildable](https://github.com/wodby/service-odoo-buildable) |
 | Ghost | [wodby/service-ghost](https://github.com/wodby/service-ghost) |
 | Python | [wodby/service-python](https://github.com/wodby/service-python) |
 | Django | [wodby/service-django](https://github.com/wodby/service-django) |
