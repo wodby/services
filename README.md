@@ -109,6 +109,7 @@ Before publishing a service for others to use, review:
 | Ruby | [wodby/service-ruby](https://github.com/wodby/service-ruby) |
 | Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
 | Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
+| Discourse (buildable) | [wodby/service-discourse-buildable](https://github.com/wodby/service-discourse-buildable) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
 | Rust | [wodby/service-rust](https://github.com/wodby/service-rust) |
 | Java | [wodby/service-java](https://github.com/wodby/service-java) |
