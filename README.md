@@ -128,6 +128,7 @@ Before publishing a service for others to use, review:
 | React | [wodby/service-react](https://github.com/wodby/service-react) |
 | Vue | [wodby/service-vue](https://github.com/wodby/service-vue) |
 | Dagster | [wodby/service-dagster](https://github.com/wodby/service-dagster) |
+| Dagster code location | [wodby/service-dagster-code](https://github.com/wodby/service-dagster-code) |
 | Chatwoot | [wodby/service-chatwoot](https://github.com/wodby/service-chatwoot) |
 | Zammad | [wodby/service-zammad](https://github.com/wodby/service-zammad) |
 | Mattermost | [wodby/service-mattermost](https://github.com/wodby/service-mattermost) |
