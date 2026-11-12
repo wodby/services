@@ -96,6 +96,7 @@ Before publishing a service for others to use, review:
 | Matomo (buildable) | [wodby/service-matomo-buildable](https://github.com/wodby/service-matomo-buildable) |
 | Mautic | [wodby/service-mautic](https://github.com/wodby/service-mautic) |
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
+| Moodle (buildable) | [wodby/service-moodle-buildable](https://github.com/wodby/service-moodle-buildable) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
 | Odoo | [wodby/service-odoo](https://github.com/wodby/service-odoo) |
 | Odoo (buildable) | [wodby/service-odoo-buildable](https://github.com/wodby/service-odoo-buildable) |
@@ -145,6 +146,7 @@ Before publishing a service for others to use, review:
 | Nginx for Matomo | [wodby/service-matomo-nginx](https://github.com/wodby/service-matomo-nginx) |
 | Nginx for Moodle | [wodby/service-moodle-nginx](https://github.com/wodby/service-moodle-nginx) |
 | Nginx for Odoo | [wodby/service-odoo-nginx](https://github.com/wodby/service-odoo-nginx) |
+| Nginx for buildable Moodle | [wodby/service-moodle-buildable-nginx](https://github.com/wodby/service-moodle-buildable-nginx) |
 | Apache HTTPD | [wodby/service-httpd](https://github.com/wodby/service-httpd) |
 | Apache HTTPD for PHP | [wodby/service-php-httpd](https://github.com/wodby/service-php-httpd) |
 | Vinyl | [wodby/service-vinyl](https://github.com/wodby/service-vinyl) |
