@@ -212,6 +212,7 @@ Before publishing a service for others to use, review:
 | Service | Repository |
 | --- | --- |
 | Keycloak | [wodby/service-keycloak](https://github.com/wodby/service-keycloak) |
+| Keycloak (buildable) | [wodby/service-keycloak-buildable](https://github.com/wodby/service-keycloak-buildable) |
 
 ### Database administration
 
