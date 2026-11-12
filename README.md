@@ -95,6 +95,7 @@ Before publishing a service for others to use, review:
 | Matomo PHP | [wodby/service-matomo](https://github.com/wodby/service-matomo) |
 | Matomo (buildable) | [wodby/service-matomo-buildable](https://github.com/wodby/service-matomo-buildable) |
 | Mautic | [wodby/service-mautic](https://github.com/wodby/service-mautic) |
+| Mautic (buildable) | [wodby/service-mautic-buildable](https://github.com/wodby/service-mautic-buildable) |
 | Moodle PHP | [wodby/service-moodle](https://github.com/wodby/service-moodle) |
 | Moodle (buildable) | [wodby/service-moodle-buildable](https://github.com/wodby/service-moodle-buildable) |
 | Nextcloud | [wodby/service-nextcloud](https://github.com/wodby/service-nextcloud) |
