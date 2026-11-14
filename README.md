@@ -205,7 +205,6 @@ Before publishing a service for others to use, review:
 | Apache Kafka | [wodby/service-kafka](https://github.com/wodby/service-kafka) |
 | Apache Spark | [wodby/service-spark](https://github.com/wodby/service-spark) |
 | Apache Airflow | [wodby/service-airflow](https://github.com/wodby/service-airflow) |
-| Apache Airflow (buildable) | [wodby/service-airflow-buildable](https://github.com/wodby/service-airflow-buildable) |
 | ZooKeeper | [wodby/service-zookeeper](https://github.com/wodby/service-zookeeper) |
 | Gotenberg | [wodby/service-gotenberg](https://github.com/wodby/service-gotenberg) |
 
