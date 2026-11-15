@@ -271,10 +271,13 @@ jobs:
           planned_changes = (details or {}).get("planned_changes") or []
           planned = bool(planned_changes and release.get("status") == "planned")
           enabled = os.environ.get("RELEASES_ENABLED") == "true"
+          # A chart major update is only proposed in a pull request, so it doesn't wait for releases to be enabled.
+          majors = bool((details or {}).get("planned_major_updates")) and os.environ.get("GITHUB_EVENT_NAME") != "pull_request"
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
               fh.write(f"apply_needed={str(planned and enabled).lower()}\n")
               fh.write(f"release_disabled={str(planned and not enabled).lower()}\n")
-          print(f"planned={planned} releases_enabled={enabled}")
+              fh.write(f"major_pr_needed={str(majors).lower()}\n")
+          print(f"planned={planned} releases_enabled={enabled} major_updates={majors}")
           PY
 
       - name: Record Disabled Release
@@ -287,7 +290,7 @@ jobs:
             --releases-disabled
 
       - name: Check Out Service Repository
-        if: steps.apply-scope.outputs.apply_needed == 'true'
+        if: steps.apply-scope.outputs.apply_needed == 'true' || steps.apply-scope.outputs.major_pr_needed == 'true'
         uses: actions/checkout@v5
         with:
           repository: wodby/${{ matrix.repo }}
@@ -313,6 +316,29 @@ jobs:
           git -C service-repo remote set-url origin \
             "https://${WODBOT_GITHUB_USERNAME}:${WODBOT_GITHUB_PAT}@github.com/wodby/${SERVICE_REPO}"
           python scripts/service_apply_updates.py \
+            --report-dir "$REPORT_DIR" \
+            --owner wodby \
+            --repo "$SERVICE_REPO" \
+            --repo-dir service-repo
+
+      - name: Propose Helm Chart Major Updates
+        if: steps.apply-scope.outputs.major_pr_needed == 'true'
+        env:
+          WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
+          WODBOT_GITHUB_USERNAME: ${{ secrets.WODBOT_GITHUB_USERNAME }}
+          WODBOT_GIT_EMAIL: ${{ secrets.WODBOT_GIT_EMAIL }}
+          WODBOT_GIT_NAME: ${{ secrets.WODBOT_GIT_NAME }}
+        run: |
+          for variable in WODBOT_GITHUB_PAT WODBOT_GITHUB_USERNAME WODBOT_GIT_EMAIL WODBOT_GIT_NAME; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::${variable} is required to propose Helm chart major updates."
+              exit 1
+            fi
+          done
+
+          git -C service-repo remote set-url origin \
+            "https://${WODBOT_GITHUB_USERNAME}:${WODBOT_GITHUB_PAT}@github.com/wodby/${SERVICE_REPO}"
+          python scripts/service_open_major_prs.py \
             --report-dir "$REPORT_DIR" \
             --owner wodby \
             --repo "$SERVICE_REPO" \
@@ -673,10 +699,13 @@ jobs:
           planned_changes = (details or {}).get("planned_changes") or []
           planned = bool(planned_changes and release.get("status") == "planned")
           enabled = os.environ.get("RELEASES_ENABLED") == "true"
+          # A chart major update is only proposed in a pull request, so it doesn't wait for releases to be enabled.
+          majors = bool((details or {}).get("planned_major_updates")) and os.environ.get("GITHUB_EVENT_NAME") != "pull_request"
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as fh:
               fh.write(f"apply_needed={str(planned and enabled).lower()}\n")
               fh.write(f"release_disabled={str(planned and not enabled).lower()}\n")
-          print(f"planned={planned} releases_enabled={enabled}")
+              fh.write(f"major_pr_needed={str(majors).lower()}\n")
+          print(f"planned={planned} releases_enabled={enabled} major_updates={majors}")
           PY
 
       - name: Record Disabled Release
@@ -689,7 +718,7 @@ jobs:
             --releases-disabled
 
       - name: Check Out Service Repository
-        if: steps.apply-scope.outputs.apply_needed == 'true'
+        if: steps.apply-scope.outputs.apply_needed == 'true' || steps.apply-scope.outputs.major_pr_needed == 'true'
         uses: actions/checkout@v5
         with:
           repository: wodby/${{ matrix.repo }}
@@ -715,6 +744,29 @@ jobs:
           git -C service-repo remote set-url origin \
             "https://${WODBOT_GITHUB_USERNAME}:${WODBOT_GITHUB_PAT}@github.com/wodby/${SERVICE_REPO}"
           python scripts/service_apply_updates.py \
+            --report-dir "$REPORT_DIR" \
+            --owner wodby \
+            --repo "$SERVICE_REPO" \
+            --repo-dir service-repo
+
+      - name: Propose Helm Chart Major Updates
+        if: steps.apply-scope.outputs.major_pr_needed == 'true'
+        env:
+          WODBOT_GITHUB_PAT: ${{ secrets.WODBOT_GITHUB_PAT }}
+          WODBOT_GITHUB_USERNAME: ${{ secrets.WODBOT_GITHUB_USERNAME }}
+          WODBOT_GIT_EMAIL: ${{ secrets.WODBOT_GIT_EMAIL }}
+          WODBOT_GIT_NAME: ${{ secrets.WODBOT_GIT_NAME }}
+        run: |
+          for variable in WODBOT_GITHUB_PAT WODBOT_GITHUB_USERNAME WODBOT_GIT_EMAIL WODBOT_GIT_NAME; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::${variable} is required to propose Helm chart major updates."
+              exit 1
+            fi
+          done
+
+          git -C service-repo remote set-url origin \
+            "https://${WODBOT_GITHUB_USERNAME}:${WODBOT_GITHUB_PAT}@github.com/wodby/${SERVICE_REPO}"
+          python scripts/service_open_major_prs.py \
             --report-dir "$REPORT_DIR" \
             --owner wodby \
             --repo "$SERVICE_REPO" \

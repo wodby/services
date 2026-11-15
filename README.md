@@ -29,6 +29,14 @@ planned updates only when the `SERVICE_AUTO_RELEASE` repository variable is
 `true` or a manual run enables **release**. A release commits the updates to
 the service repository and pushes a new patch tag.
 
+A new Helm chart major version isn't released automatically, because it can
+change the chart's values or resources. The updater keeps the service on the
+newest chart of its current major version and opens one pull request in the
+service repository with the new major version for review. It doesn't open a
+second pull request for the same major version, and doesn't reopen one that was
+closed. After merging such a pull request, tag a release of the service
+repository; the updater tags only the changes it makes itself.
+
 Repository discovery checks that every active public `service-*` repository is
 listed below. A missing entry fails the workflow so it cannot silently lose
 update coverage. External services have no managed software to update.

@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -603,6 +603,13 @@ def major_version(value: str | None) -> int | None:
     return parsed.major if parsed is not None else None
 
 
+def is_newer_version(candidate: str, current: str) -> bool:
+    """Report whether candidate is a newer version than current; unparsable versions are never newer."""
+    parsed_candidate = parse_version(candidate)
+    parsed_current = parse_version(current)
+    return parsed_candidate is not None and parsed_current is not None and parsed_candidate > parsed_current
+
+
 def is_major_version_change(current: str, latest: str) -> bool:
     current_major = major_version(current)
     latest_major = major_version(latest)
@@ -1103,6 +1110,8 @@ class RepoResult:
     build_boilerplate_warnings: list[str]
     build_boilerplate_checks: list[dict[str, Any]]
     planned_release: dict[str, Any] | None
+    # Helm chart major updates the robot proposes in a pull request instead of releasing them itself.
+    planned_major_updates: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1133,6 +1142,7 @@ class RepoResult:
             "build_boilerplate_warnings": self.build_boilerplate_warnings,
             "build_boilerplate_checks": self.build_boilerplate_checks,
             "planned_release": self.planned_release,
+            "planned_major_updates": self.planned_major_updates,
         }
 
 
@@ -2693,6 +2703,38 @@ class UpdateReportGenerator:
                 best_raw = raw
         return best_raw
 
+    def get_helm_latest_in_major(self, source: str, chart: str, major: int) -> str | None:
+        """Return the newest stable chart version with the given major version, or None when none is known."""
+        chart_name = self.wodby_chart_name(source, chart)
+        if chart_name is not None:
+            # Wodby's own charts publish only their latest version's metadata.
+            latest = str(self.get_wodby_chart_metadata(chart_name)["version"])
+            return latest if major_version(latest) == major else None
+
+        if source.startswith("oci://"):
+            reference = chart if chart.startswith("oci://") else source
+            matched = latest_matching_major_tag(set(self.get_oci_tags(reference)), major)
+            return matched[0] if matched else None
+
+        if source not in self._helm_index_cache:
+            index_url = f"{source.rstrip('/')}/index.yaml"
+            payload = yaml.safe_load(self.fetch(index_url).content.decode("utf-8", "ignore"))
+            self._helm_index_cache[source] = payload
+
+        index = self._helm_index_cache[source]
+        chart_name = chart.split("/", 1)[1] if "/" in chart else chart
+        best_version: Version | None = None
+        best_raw: str | None = None
+        for entry in index.get("entries", {}).get(chart_name, []):
+            raw = str(entry["version"])
+            parsed = parse_version(raw)
+            if parsed is None or parsed.is_prerelease or parsed.major != major:
+                continue
+            if best_version is None or parsed > best_version:
+                best_version = parsed
+                best_raw = raw
+        return best_raw
+
     def helm_version_exists(self, source: str, chart: str, version: str) -> bool:
         if source.startswith("oci://"):
             reference = chart if chart.startswith("oci://") else source
@@ -3216,6 +3258,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
         notification_groups: dict[str, list[str]] = empty_notification_groups()
         eol_updates: list[str] = []
         major_updates: list[str] = []
+        planned_major_updates: list[dict[str, Any]] = []
         planned_changes: list[dict[str, Any]] = []
         dry_run_changes: list[dict[str, Any]] = []
         updates_without_local_diff: list[str] = []
@@ -3521,6 +3564,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 comparable = True
                 planned_helm_target: str | None = None
                 planned_helm_change: dict[str, Any] | None = None
+                target_chart: str | None = None
                 try:
                     latest_chart = generator.get_helm_latest(helm_source, helm_chart)
                     if latest_chart is None:
@@ -3529,14 +3573,40 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     elif latest_chart == helm_version:
                         current.append(f"{prefix}helm chart latest version is current (`{helm_version}`)")
-                    elif is_major_version_change(helm_version, latest_chart):
-                        message = (
-                            f"{prefix}new major Helm chart version `{latest_chart}` is available "
-                            f"for `{helm_chart}` (current: `{helm_version}`); manual review required"
-                        )
-                        major_updates.append(message)
-                        add_repo_notification(notifications, notification_groups, "helm_major_version", message)
                     else:
+                        target_chart = latest_chart
+                        if is_major_version_change(helm_version, latest_chart):
+                            major_message = (
+                                f"{prefix}new major Helm chart version `{latest_chart}` is available "
+                                f"for `{helm_chart}` (current: `{helm_version}`); a pull request proposes it for review"
+                            )
+                            major_updates.append(major_message)
+                            add_repo_notification(notifications, notification_groups, "helm_major_version", major_message)
+                            if isinstance(raw_helm, dict) and raw_helm.get("version") is not None:
+                                planned_major_updates.append(
+                                    {
+                                        "manifest_path": manifest_path,
+                                        "helm_source": helm_source,
+                                        "helm_chart": helm_chart,
+                                        "current": helm_version,
+                                        "target": latest_chart,
+                                        "service_label": label if multiple_manifests else "",
+                                        "message": major_message,
+                                    }
+                                )
+                            # Until the major is reviewed, keep the service on the newest chart of its current major.
+                            target_chart = generator.get_helm_latest_in_major(
+                                helm_source, helm_chart, major_version(helm_version)
+                            )
+                            if target_chart is None or target_chart == helm_version or not is_newer_version(
+                                target_chart, helm_version
+                            ):
+                                current.append(
+                                    f"{prefix}helm chart is the latest of its major version (`{helm_version}`)"
+                                )
+                                target_chart = None
+                    if target_chart is not None:
+                        latest_chart = target_chart
                         message = (
                             f"{prefix}a new chart version is available `{latest_chart}` (current: `{helm_version}`)"
                         )
@@ -3668,6 +3738,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                 build_boilerplate_warnings=build_boilerplate_warnings,
                 build_boilerplate_checks=build_boilerplate_checks,
                 planned_release=planned_release,
+                planned_major_updates=planned_major_updates,
             )
         )
 
