@@ -220,6 +220,7 @@ Before publishing a service for others to use, review:
 
 | Service | Repository |
 | --- | --- |
+| authentik | [wodby/service-authentik](https://github.com/wodby/service-authentik) |
 | Keycloak | [wodby/service-keycloak](https://github.com/wodby/service-keycloak) |
 | Keycloak (buildable) | [wodby/service-keycloak-buildable](https://github.com/wodby/service-keycloak-buildable) |
 
