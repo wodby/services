@@ -15,7 +15,7 @@ from service_update_report import UpdateReportGenerator, development_image_tag, 
 
 
 class DevelopmentImagePairsTest(unittest.TestCase):
-    def report(self, options, tags, image="wodby/php", path="service.yml", parent=None, git_tags=None):
+    def report(self, options, tags, image="wodby/php", path="service.yml", parent=None, git_tags=None, digests=None):
         manifest = {
             "name": "php",
             "type": "service",
@@ -30,6 +30,11 @@ class DevelopmentImagePairsTest(unittest.TestCase):
         generator.get_image_tags = lambda _: tags
         generator.get_github_tags = lambda _, repo: {"3.2.1"} if repo == "service-php" else set(tags if git_tags is None else git_tags)
         generator.get_image_change_notes = lambda *_: []
+        if digests is None:
+            # These tests cover tag pairs; digest pinning has its own tests.
+            generator.plan_option_digests = lambda **_: {key: [] for key in ("updates", "current", "warnings", "planned_changes")}
+        else:
+            generator.get_image_digest = lambda image_name, tag: digests[f"{image_name}:{tag}"]
         empty = {key: [] for key in (
             "updates", "current", "warnings", "notifications", "major_updates", "planned_changes",
         )}

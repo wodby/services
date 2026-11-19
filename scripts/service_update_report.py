@@ -23,6 +23,8 @@ from packaging.version import InvalidVersion, Version
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from image_digests import ImageRegistry, analyze_rebuild, render_rebuild_note
+
 
 README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
 README_MANAGED_SERVICES_HEADING = "## Managed services"
@@ -638,6 +640,11 @@ def format_diff_value(value: Any) -> str:
     return normalized if normalized is not None else "null"
 
 
+def image_has_own_reference(image: str) -> bool:
+    """Whether a container image names its own tag or digest instead of taking the option's tag."""
+    return "@" in image or ":" in image.rsplit("/", 1)[-1]
+
+
 def make_planned_change(
     manifest_path: str,
     field_path: str,
@@ -840,9 +847,29 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
         else:
             lines.append(f"{prefix}{image} image tags updated: {'; '.join(target_parts)}")
 
+    digest_groups: dict[tuple[str, str, str], list[str]] = {}
+    for change in planned_changes:
+        if change.get("change_type") != "image_digest" or change.get("digest_kind") == "tag":
+            continue
+        key = (
+            str(change.get("service_label") or "").strip(),
+            str(change.get("image") or "image"),
+            str(change.get("digest_kind") or "pin"),
+        )
+        reference = f"`{change.get('image_tag') or change.get('image_version')}`"
+        if reference not in digest_groups.setdefault(key, []):
+            digest_groups[key].append(reference)
+    for (service_label, image, kind), references in digest_groups.items():
+        prefix = f"{service_label}: " if service_label else ""
+        noun = "tag" if len(references) == 1 else "tags"
+        if kind == "rebuild":
+            lines.append(f"{prefix}{image} image digest updated for rebuilt {noun} {', '.join(references)}")
+        else:
+            lines.append(f"{prefix}{image} image pinned by digest for {noun} {', '.join(references)}")
+
     for change in planned_changes:
         change_type = change.get("change_type")
-        if change_type == "image_tag":
+        if change_type in ("image_tag", "image_digest"):
             continue
         after = format_diff_value(change.get("display_after", change.get("after")))
         prefix = label_prefix(change)
@@ -887,7 +914,7 @@ def render_release_description(
         lines.append("")
         lines.append("Helm chart changes:")
         lines.extend(chart_note_blocks)
-    image_note_blocks = render_image_change_notes(planned_changes)
+    image_note_blocks = render_image_change_notes(planned_changes) + render_image_rebuild_notes(planned_changes)
     if image_note_blocks:
         lines.append("")
         lines.append("Image changes:")
@@ -1023,6 +1050,23 @@ def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str
 
     notes = [group["note"] for group in grouped.values() if group.get("note")]
     return render_customer_change_notes(notes)
+
+
+def render_image_rebuild_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
+    """Render one note per upstream rebuild; options that share an image and tag share the note."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for change in planned_changes:
+        if change.get("change_type") != "image_digest" or change.get("digest_kind") != "rebuild":
+            continue
+        note = str(change.get("rebuild_note") or "").strip()
+        if not note or note in seen:
+            continue
+        seen.add(note)
+        note_lines = note.splitlines()
+        lines.append(f"- {note_lines[0]}")
+        lines.extend(f"  {line}" if line else "" for line in note_lines[1:])
+    return lines
 
 
 def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
@@ -1201,6 +1245,9 @@ class UpdateReportGenerator:
         self._wodby_chart_values_cache: dict[str, dict[str, Any]] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
         self._eol_product_cache: dict[str, dict[str, Any] | None] = {}
+        self._image_registry: ImageRegistry | None = None
+        self._image_digest_cache: dict[tuple[str, str], str] = {}
+        self._image_rebuild_note_cache: dict[tuple[str, str, str, str, str | None], str] = {}
 
     def get_public_service_repos(self) -> set[str]:
         """Find active public managed repositories so catalog omissions fail discovery."""
@@ -2129,6 +2176,114 @@ class UpdateReportGenerator:
         if registry == "ghcr.io":
             return self.get_ghcr_tags(repo)
         return self.get_registry_v2_tags(registry, repo)
+
+    def get_image_registry(self) -> ImageRegistry:
+        if self._image_registry is None:
+            self._image_registry = ImageRegistry(self.session, self.registry_bearer_token)
+        return self._image_registry
+
+    def get_image_digest(self, image: str, tag: str) -> str:
+        """Return the digest `image:tag` points to now (the index digest of a multi-platform image)."""
+        key = (image, tag)
+        if key not in self._image_digest_cache:
+            registry, repo = self.image_repository(image)
+            self._image_digest_cache[key] = self.get_image_registry().digest(registry, repo, tag)
+        return self._image_digest_cache[key]
+
+    def describe_image_rebuild(self, image: str, tag: str, before: str, after: str, product: str | None) -> str:
+        """Summarize what an upstream rebuild of `image:tag` changed, for release notes."""
+        key = (image, tag, before, after, product)
+        if key not in self._image_rebuild_note_cache:
+            registry, repo = self.image_repository(image)
+            facts = analyze_rebuild(self.get_image_registry(), image, registry, repo, tag, before, after)
+            self._image_rebuild_note_cache[key] = render_rebuild_note(facts, product)
+        return self._image_rebuild_note_cache[key]
+
+    def plan_option_digests(
+        self,
+        *,
+        image: str,
+        images: list[str],
+        option: dict[str, Any],
+        raw_option: dict[str, Any],
+        tag: str | None,
+        dev_tag: str | None,
+        tag_changed: bool,
+        dev_tag_changed: bool,
+        manifest_path: str,
+        image_prefix: str,
+        service_label: str,
+        product: str | None,
+    ) -> dict[str, list[Any]]:
+        """Plan `digest`/`devDigest` updates so each option pins the image its tag selects.
+
+        A missing digest is pinned. A digest that moves with a planned tag change follows the tag.
+        A third-party tag that points to a new digest was rebuilt upstream; its release notes describe
+        the rebuild. Wodby revision tags are never rebuilt, so a moved digest there is only reported.
+        """
+        result: dict[str, list[Any]] = {"updates": [], "current": [], "warnings": [], "planned_changes": []}
+        wanted = str(option.get("version"))
+        option_images = sorted({
+            self.image_repository(candidate)
+            for candidate in images
+            if not image_has_own_reference(candidate)
+        })
+        if len(option_images) > 1:
+            names = ", ".join(f"`{registry}/{repo}`" for registry, repo in option_images)
+            result["warnings"].append(
+                f"{image_prefix}option digests are not pinned for version `{wanted}`: images {names} "
+                "all take the option tag, but one digest can pin only one image"
+            )
+            return result
+
+        owner = self.is_owner_image(image)
+        for key, selected_tag, changed in (("digest", tag, tag_changed), ("devDigest", dev_tag, dev_tag_changed)):
+            if not selected_tag:
+                continue
+            pinned = normalize_change_value(raw_option.get(key))
+            reference = f"{image}:{selected_tag}"
+            try:
+                digest = self.get_image_digest(image, selected_tag)
+            except Exception as exc:
+                result["warnings"].append(f"{image_prefix}digest lookup failed for `{reference}`: {exc}")
+                continue
+            if pinned == digest:
+                result["current"].append(f"{image_prefix}`{key}` pins `{reference}` for version `{wanted}`")
+                continue
+            if not pinned:
+                kind = "pin"
+            elif changed:
+                kind = "tag"
+            elif owner:
+                result["warnings"].append(
+                    f"{image_prefix}`{reference}` now points to `{digest}` instead of the pinned `{pinned}`; "
+                    "Wodby revision tags are not rebuilt, so this is left for review and not released"
+                )
+                continue
+            else:
+                kind = "rebuild"
+
+            if kind == "rebuild":
+                message = f"{image_prefix}updating `{key}` for version `{wanted}`: `{reference}` was rebuilt upstream"
+            elif kind == "tag":
+                message = f"{image_prefix}updating `{key}` for version `{wanted}` to pin `{reference}`"
+            else:
+                message = f"{image_prefix}pinning `{reference}` by `{key}` for version `{wanted}`"
+            extra: dict[str, Any] = {
+                "change_type": "image_digest",
+                "digest_kind": kind,
+                "image": image,
+                "image_tag": selected_tag,
+                "image_version": wanted,
+                "service_label": service_label,
+            }
+            if kind == "rebuild":
+                extra["rebuild_note"] = self.describe_image_rebuild(image, selected_tag, str(pinned), digest, product)
+            result["updates"].append(message)
+            result["planned_changes"].append(
+                make_planned_change(manifest_path, f"options[version={wanted}].{key}", key, pinned, digest, message, extra)
+            )
+        return result
 
     def get_tailscale_stable_versions(self) -> list[str]:
         cache_key = ("tailscale-stable", "versions")
@@ -3520,6 +3675,31 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                 updates_without_local_diff.append(
                                     f"{message}; additional image comparison is report only"
                                 )
+
+                        raw_digest_option = raw_option_index.get(wanted)
+                        if can_plan_image_changes and raw_digest_option is not None:
+                            final_tag = target if target is not None else (configured if configured_exists else None)
+                            final_dev_tag = (
+                                development_image_tag(target) if paired and target is not None else option.get("devTag")
+                            )
+                            digest_result = generator.plan_option_digests(
+                                image=image,
+                                images=images,
+                                option=option,
+                                raw_option=raw_digest_option,
+                                tag=final_tag,
+                                dev_tag=final_dev_tag,
+                                tag_changed=target is not None and target != configured,
+                                dev_tag_changed=bool(final_dev_tag) and final_dev_tag != option.get("devTag"),
+                                manifest_path=manifest_path,
+                                image_prefix=image_prefix,
+                                service_label=label if multiple_manifests else "",
+                                product=str(raw_service_data.get("title") or "") or None,
+                            )
+                            updates.extend(digest_result["updates"])
+                            current.extend(digest_result["current"])
+                            warnings.extend(digest_result["warnings"])
+                            planned_changes.extend(digest_result["planned_changes"])
 
                         # Repair a stale devTag even when production is already current.
                         if paired and target is not None:
