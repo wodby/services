@@ -29,7 +29,7 @@ class DevelopmentImagePairsTest(unittest.TestCase):
         generator.get_service_data = lambda *_: manifest
         generator.get_image_tags = lambda _: tags
         generator.get_github_tags = lambda _, repo: {"3.2.1"} if repo == "service-php" else set(tags if git_tags is None else git_tags)
-        generator.get_image_change_notes = lambda *_: []
+        generator.get_image_changelog = lambda *_: {"entries": [], "gaps": [], "fallback": None}
         if digests is None:
             # These tests cover tag pairs; digest pinning has its own tests.
             generator.plan_option_digests = lambda **_: {key: [] for key in ("updates", "current", "warnings", "planned_changes")}

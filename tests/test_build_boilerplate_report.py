@@ -382,27 +382,34 @@ Keep this repository-specific guidance.
         self.assertIn("inheritance cycle", cycle_note["message"])
 
     def test_service_release_leads_with_image_changes_and_deduplicates_tag_updates(self) -> None:
-        image_note = {
-            "repo": "wodby/node",
-            "tag": "1.72.2",
-            "message": "node updates: 26.5.1, 24.18.1",
-            "base_changes": [],
+        entry = {
+            "image": "wodby/node",
+            "revision": "r18",
+            "title": "Update Node.js to 26.5.1 and 24.18.1",
+            "bullets": ["Node.js 26.5.0 → 26.5.1, 24.18.0 → 24.18.1"],
+            "base_of": None,
         }
-        planned_changes = [
-            {
+        option_tags = {"26": "26-r18", "24": "24-r18", "22": "22-r17"}
+        planned_changes = []
+        for version in ("26", "24"):
+            planned_changes.append({
                 "change_type": "image_tag",
                 "image": "wodby/node",
                 "image_version": version,
-                "before": before,
-                "after": after,
-                "image_change_notes": [copy.deepcopy(image_note)],
-            }
-            for version, before, after in (
-                ("26", "26-1.72.1", "26-1.72.2"),
-                ("24", "24-1.72.1", "24-1.72.2"),
-                ("22", "22-1.72.1", "22-1.72.2"),
-            )
-        ]
+                "before": f"{version}-r17",
+                "after": f"{version}-r18",
+                "image_option_tags": option_tags,
+                "image_changelog": {"entries": [copy.deepcopy(entry)], "gaps": [], "fallback": None},
+            })
+            planned_changes.append({
+                "change_type": "image_tag",
+                "image": "wodby/node",
+                "image_version": version,
+                "before": f"{version}-dev-r17",
+                "after": f"{version}-dev-r18",
+                "image_option_tags": option_tags,
+                "development": True,
+            })
 
         description = render_release_description(
             "service-node",
@@ -417,13 +424,11 @@ Keep this repository-specific guidance.
 Release 1.0.7
 
 Image changes:
-- node updates: 26.5.1, 24.18.1
+- Update Node.js to 26.5.1 and 24.18.1 (wodby/node r18)
+  - Node.js 26.5.0 → 26.5.1, 24.18.0 → 24.18.1
 
-(wodby/node image tags updated: `26-1.72.2` for `26`; `24-1.72.2` for `24`; `22-1.72.2` for `22`)""",
+(wodby/node image revision updated to r18 except 22)""",
         )
-        self.assertNotIn("Versions updated:", description)
-        self.assertNotIn("\nChanges:\n", description)
-        self.assertNotIn("Technical changes:", description)
 
     def test_wodby_chart_changes_are_included_in_service_release_description(self) -> None:
         generator = FakeGenerator()

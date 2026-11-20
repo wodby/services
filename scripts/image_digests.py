@@ -289,7 +289,8 @@ def parse_apk(data: bytes) -> dict[str, Package]:
     packages: dict[str, Package] = {}
     for block in data.decode(errors="replace").split("\n\n"):
         fields = {line[0]: line[2:] for line in block.splitlines() if len(line) > 2 and line[1] == ":"}
-        if fields.get("P"):
+        # Virtual packages (`.nginx-rundeps`) only group dependencies and change version on every build.
+        if fields.get("P") and not fields["P"].startswith("."):
             packages[fields["P"]] = Package(fields["P"], fields.get("V", ""), fields.get("o") or fields["P"])
     return packages
 
@@ -473,6 +474,24 @@ def render_rebuild_note(facts: RebuildFacts, product: str | None = None) -> str:
     else:
         headline += " Changes:"
 
+    lines = change_lines(facts)
+    if not lines:
+        return f"{reference} was rebuilt upstream" + (f" on {when}" if when else "") + \
+            ". No version or OS package changes were found."
+    return "\n".join([headline] + [f"- {line}" for line in lines])
+
+
+def package_change_line(label: str, old: str, new: str, package_format: str | None) -> str:
+    if old and new:
+        old_version, new_version = display_versions(old, new, package_format)
+        return f"{label} {old_version} → {new_version}"
+    if new:
+        return f"{label} {upstream_version(new, package_format)} added"
+    return f"{label} removed"
+
+
+def change_lines(facts: RebuildFacts) -> list[str]:
+    """Summarize runtime and OS package changes: key products by name, the rest as a count."""
     lines: list[str] = []
     shown_labels: set[str] = set()
     for label, old, new in facts.runtimes:
@@ -480,21 +499,20 @@ def render_rebuild_note(facts: RebuildFacts, product: str | None = None) -> str:
         shown_labels.add(label)
 
     others: list[str] = []
+    other_changes: list[str] = []
     for source, old, new in facts.packages:
         label = key_package_label(source)
         if label and label not in shown_labels:
-            if old and new:
-                old_version, new_version = display_versions(old, new, facts.package_format)
-                lines.append(f"{label} {old_version} → {new_version}")
-            elif new:
-                lines.append(f"{label} {upstream_version(new, facts.package_format)} added")
-            else:
-                lines.append(f"{label} removed")
+            lines.append(package_change_line(label, old, new, facts.package_format))
             shown_labels.add(label)
         elif not label:
             others.append(source)
+            other_changes.append(package_change_line(NOTABLE_LABELS.get(source, source), old, new, facts.package_format))
 
-    if others:
+    # A few changed packages are listed with their versions; more are counted.
+    if 0 < len(others) <= 3:
+        lines.extend(other_changes)
+    elif others:
         distribution = PACKAGE_FORMAT_LABELS.get(facts.package_format or "", "OS")
         notable = [NOTABLE_LABELS.get(name, name) for name in NOTABLE_PACKAGES if name in others][:4]
         noun = "package" if len(others) == 1 else "packages"
@@ -508,7 +526,4 @@ def render_rebuild_note(facts: RebuildFacts, product: str | None = None) -> str:
             summary += f": {join_names(others)}"
         lines.append(summary)
 
-    if not lines:
-        return f"{reference} was rebuilt upstream" + (f" on {when}" if when else "") + \
-            ". No version or OS package changes were found."
-    return "\n".join([headline] + [f"- {line}" for line in lines])
+    return lines

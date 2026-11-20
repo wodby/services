@@ -40,6 +40,17 @@ planned updates only when the `SERVICE_AUTO_RELEASE` repository variable is
 `true` or a manual run enables **release**. A release commits the updates to
 the service repository and pushes a new patch tag.
 
+Release notes lead with what changed in the images. For a Wodby image revision
+update, the updater reads the image's release note for every revision in the
+update. A note that only records a new base image, such as
+`Base image wodby/alpine: 3.23-r17 -> 3.23-r18`, is followed into the base
+image's notes, recursively. Bullets and notes that name only other version lines
+(`Alpine 3.24` for an image on Alpine 3.23) or exclude the image are left out.
+When no note applies to a version, the notes compare the two images instead and
+list the version and package changes, or say there were none. Tag and digest
+updates follow as one short line per image, such as
+`(wodby/php image revision updated to r18 except 8.2)`.
+
 A new Helm chart major version isn't released automatically, because it can
 change the chart's values or resources. The updater keeps the service on the
 newest chart of its current major version and opens one pull request in the

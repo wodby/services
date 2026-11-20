@@ -49,20 +49,21 @@ class ImageRevisionTest(unittest.TestCase):
         self.assertEqual(self.pick(["11.4-3.36.4"], ["3.36.4"]), "11.4-3.36.4")
         self.assertIsNone(self.pick(["11.4-3.36.4"], []))
 
-    def test_revision_notes_follow_alias_to_repository_release(self):
-        calls = []
-        self.generator.get_github_tag_note = lambda *_: {
-            "message": "wodby/mariadb:11.4.13-r0 from image release r37\n\nImage: wodby/mariadb@sha256:abc"
+    def test_changelog_maps_full_version_aliases_through_their_annotation(self):
+        messages = {
+            ("mariadb", "11.4.12-r5"): "wodby/mariadb:11.4.12-r5 from image release r36",
+            ("mariadb", "11.4.13-r0"): "wodby/mariadb:11.4.13-r0 from image release r37",
+            ("mariadb", "r37"): "MariaDB updates: 11.4.12 -> 11.4.13",
         }
-        self.generator.build_wodby_tag_note_tree = lambda repo, tag, version: calls.append((repo, tag, version)) or {"tag": tag}
-        notes = self.generator.get_image_change_notes("wodby/mariadb", "11.4.12-r5", "11.4.13-r0", "11.4")
-        self.assertEqual(calls, [("mariadb", "r37", "11.4")])
-        self.assertEqual(notes, [{"tag": "r37"}])
+        self.generator.wodby_release_message = lambda repo, tag: messages.get((repo, tag))
+        self.generator.get_github_tag_note = lambda _owner, repo, tag: {"message": messages[(repo, tag)]} if (repo, tag) in messages else None
+        changelog = self.generator.get_image_changelog("wodby/mariadb", "11.4.12-r5", "11.4.13-r0")
+        self.assertEqual([(e["revision"], e["title"]) for e in changelog["entries"]], [("r37", "MariaDB updates: 11.4.12 -> 11.4.13")])
+        self.assertIsNone(changelog["fallback"])
 
-    def test_missing_alias_annotation_does_not_guess_release(self):
-        self.generator.get_github_tag_note = lambda *_: None
-        notes = self.generator.get_image_change_notes("wodby/mariadb", None, "11.4.13-r0", "11.4")
-        self.assertIn("does not identify its repository release", notes[0]["message"])
+    def test_changelog_without_previous_tag_is_empty(self):
+        changelog = self.generator.get_image_changelog("wodby/mariadb", None, "11.4.13-r0")
+        self.assertEqual(changelog, {"entries": [], "gaps": [], "fallback": None})
 
     def test_chart_fallback_extracts_upstream_version(self):
         self.generator.get_wodby_chart_image_tag = lambda _: "0.69-r12"
