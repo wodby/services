@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 import tarfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,11 +26,13 @@ from urllib3.util.retry import Retry
 # The workflow runs this file as a script (scripts/ on the path) and also imports
 # it as scripts.service_update_report from the repository root.
 try:
-    from image_digests import ImageRegistry, analyze_rebuild, render_rebuild_note
+    from image_changelog import ChangelogEntry, WodbyImageChangelog, render_changelog_entry
+    from image_digests import ImageRegistry, analyze_rebuild, change_lines, render_rebuild_note
 except ModuleNotFoundError as error:
-    if error.name != "image_digests":
+    if error.name not in ("image_changelog", "image_digests"):
         raise
-    from scripts.image_digests import ImageRegistry, analyze_rebuild, render_rebuild_note
+    from scripts.image_changelog import ChangelogEntry, WodbyImageChangelog, render_changelog_entry
+    from scripts.image_digests import ImageRegistry, analyze_rebuild, change_lines, render_rebuild_note
 
 
 README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
@@ -383,7 +385,6 @@ WODBY_TAG_RE = re.compile(
     r"(?:-(?P<variant>[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*?))?"
     r"-(?P<release>r(?:0|[1-9]\d*)|\d+(?:\.\d+)*)$"
 )
-IMAGE_RELEASE_ALIAS_RE = re.compile(r"^\S+ from image release (?P<release>r(?:0|[1-9]\d*))$", re.MULTILINE)
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)(?P<variant>-[A-Za-z0-9._-]+)?$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
@@ -825,7 +826,7 @@ def label_prefix(change: dict[str, Any]) -> str:
 def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[str]:
     """Summarize manifest-only updates without repeating customer-facing changes."""
     lines: list[str] = []
-    image_groups: dict[tuple[str, str], dict[str, list[str]]] = {}
+    image_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for change in planned_changes:
         if change.get("change_type") != "image_tag":
             continue
@@ -833,26 +834,10 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
             str(change.get("service_label") or "").strip(),
             str(change.get("image") or "image"),
         )
-        target = format_diff_value(change.get("after"))
-        version = str(change.get("image_version") or "unknown")
-        image_groups.setdefault(key, {}).setdefault(target, []).append(version)
-
-    for (service_label, image), targets in image_groups.items():
+        image_groups.setdefault(key, []).append(change)
+    for (service_label, image), changes in image_groups.items():
         prefix = f"{service_label}: " if service_label else ""
-        target_parts: list[str] = []
-        version_count = 0
-        for target, versions in targets.items():
-            version_count += len(versions)
-            formatted_versions = ", ".join(f"`{version}`" for version in versions)
-            target_parts.append(f"`{target}` for {formatted_versions}")
-        if len(targets) == 1:
-            target, versions = next(iter(targets.items()))
-            action = "image tag updated to" if version_count == 1 else "image tags updated to"
-            formatted_versions = ", ".join(f"`{version}`" for version in versions)
-            version_label = "" if version_count == 1 else "versions "
-            lines.append(f"{prefix}{image} {action} `{target}` for {version_label}{formatted_versions}")
-        else:
-            lines.append(f"{prefix}{image} image tags updated: {'; '.join(target_parts)}")
+        lines.append(f"{prefix}{summarize_image_tag_changes(image, changes)}")
 
     digest_groups: dict[tuple[str, str, str], list[str]] = {}
     for change in planned_changes:
@@ -866,13 +851,12 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
         reference = f"`{change.get('image_tag') or change.get('image_version')}`"
         if reference not in digest_groups.setdefault(key, []):
             digest_groups[key].append(reference)
-    for (service_label, image, kind), references in digest_groups.items():
+    for (service_label, image, kind), _references in digest_groups.items():
         prefix = f"{service_label}: " if service_label else ""
-        noun = "tag" if len(references) == 1 else "tags"
         if kind == "rebuild":
-            lines.append(f"{prefix}{image} image digest updated for rebuilt {noun} {', '.join(references)}")
+            lines.append(f"{prefix}{image} image digest updated to the rebuilt image")
         else:
-            lines.append(f"{prefix}{image} image pinned by digest for {noun} {', '.join(references)}")
+            lines.append(f"{prefix}{image} image pinned by digest")
 
     for change in planned_changes:
         change_type = change.get("change_type")
@@ -906,6 +890,52 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
             field_path = str(change.get("path") or change.get("key") or "value")
             lines.append(f"{prefix}`{field_path}` updated to `{after}`")
     return lines
+
+
+def join_words(items: list[str]) -> str:
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def image_tag_revision(tag: str) -> str | None:
+    """The shared revision (`r18`) of a Wodby image tag, or None for other tags."""
+    match = WODBY_TAG_RE.fullmatch(tag or "")
+    if not match or not match.group("release").startswith("r"):
+        return None
+    return match.group("release")
+
+
+def summarize_image_tag_changes(image: str, changes: list[dict[str, Any]]) -> str:
+    """One line for an image's tag updates: the new revision, and only the options it skipped."""
+    production = [change for change in changes if not change.get("development")] or changes
+    revisions = {image_tag_revision(format_diff_value(change.get("after"))) for change in production}
+    if len(revisions) == 1 and None not in revisions:
+        revision = next(iter(revisions))
+        option_tags = production[0].get("image_option_tags") or {}
+        left_behind = [version for version, tag in option_tags.items() if image_tag_revision(tag) != revision]
+        updated = [version for version in option_tags if version not in left_behind]
+        line = f"{image} image revision updated to {revision}"
+        if left_behind and len(left_behind) <= len(updated):
+            line += f" except {join_words(left_behind)}"
+        elif left_behind:
+            line += f" for {join_words(updated)}"
+        return line
+    if all(revision is not None for revision in revisions):
+        by_revision: dict[str, list[str]] = {}
+        for change in production:
+            revision = image_tag_revision(format_diff_value(change.get("after")))
+            version = str(change.get("image_version") or "")
+            if version not in by_revision.setdefault(revision, []):
+                by_revision[revision].append(version)
+        parts = [f"{revision} for {join_words(versions)}" for revision, versions in by_revision.items()]
+        return f"{image} image revisions updated: {'; '.join(parts)}"
+    targets: list[str] = []
+    for change in production:
+        target = f"`{format_diff_value(change.get('after'))}`"
+        if target not in targets:
+            targets.append(target)
+    return f"{image} image updated to {join_words(targets)}"
 
 
 def render_release_description(
@@ -1035,28 +1065,43 @@ def render_customer_change_notes(notes: list[dict[str, Any]]) -> list[str]:
 
 
 def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
-    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    """Render what image tag updates changed: release notes first, then image comparisons."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    unchanged: dict[str, list[str]] = {}
+    compared: list[tuple[str, list[str]]] = []
     for change in planned_changes:
-        if change.get("change_type") != "image_tag":
+        if change.get("change_type") != "image_tag" or change.get("development"):
             continue
-        image = str(change.get("image") or "")
-        target = str(change.get("after") or "")
-        notes = change.get("image_change_notes") or []
-        note = notes[0] if notes else None
-        group_key = (
-            str(note.get("repo") or image) if note else image,
-            str(note.get("tag") or target) if note else target,
-        )
-        grouped.setdefault(
-            group_key,
-            {
-                "image": image,
-                "note": note,
-            },
-        )
-
-    notes = [group["note"] for group in grouped.values() if group.get("note")]
-    return render_customer_change_notes(notes)
+        changelog = change.get("image_changelog") or {}
+        for entry in changelog.get("entries") or []:
+            entry_lines = render_changelog_entry(ChangelogEntry(**entry))
+            identity = "\n".join(entry_lines)
+            if identity not in seen:
+                seen.add(identity)
+                lines.extend(entry_lines)
+        fallback = changelog.get("fallback")
+        if not fallback:
+            continue
+        image = str(change.get("image") or "image")
+        tag = format_diff_value(change.get("after"))
+        if fallback.get("error"):
+            compared.append((f"`{image}:{tag}`: its changes could not be determined ({fallback['error']})", []))
+        elif fallback.get("lines"):
+            compared.append((f"`{image}:{tag}`:", list(fallback["lines"])))
+        else:
+            unchanged.setdefault(image, []).append(tag)
+    for headline, details in compared:
+        identity = "\n".join([headline] + details)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        lines.append(f"- {headline}")
+        lines.extend(f"  - {detail}" for detail in details)
+    for image, tags in unchanged.items():
+        noun = "tag" if len(tags) == 1 else "tags"
+        lines.append(f"- `{image}` {noun} {join_words([f'`{tag}`' for tag in tags])}: rebuilt with no version or OS package changes")
+    return lines
 
 
 def render_image_rebuild_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
@@ -1238,7 +1283,7 @@ class UpdateReportGenerator:
         self._github_tag_note_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._ref_file_cache: dict[tuple[str, str, str], str | None] = {}
         self._base_image_repo_cache: dict[tuple[str, str, str | None], str | None] = {}
-        self._image_change_notes_cache: dict[tuple[str, str | None, str, str | None], list[dict[str, Any]]] = {}
+        self._image_changelog_cache: dict[tuple[str, str | None, str], dict[str, Any]] = {}
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
         self._oci_chart_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
         self._oci_manifest_cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -2022,50 +2067,52 @@ class UpdateReportGenerator:
         ]
         return note
 
-    def get_image_change_notes(
-        self,
-        image: str,
-        previous_tag: str | None,
-        target_tag: str,
-        image_version: str | None,
-    ) -> list[dict[str, Any]]:
-        cache_key = (image, previous_tag, target_tag, image_version)
-        if cache_key in self._image_change_notes_cache:
-            return copy.deepcopy(self._image_change_notes_cache[cache_key])
+    def wodby_release_message(self, repo: str, tag: str) -> str | None:
+        """The annotated message of a Wodby image tag; None when the tag doesn't exist."""
+        note = self.get_github_tag_note(self.owner, repo, tag)
+        if note is None:
+            return None
+        message = str(note.get("message") or "")
+        return "" if message.startswith("Tag is lightweight") else message
 
-        if not self.is_owner_image(image):
-            self._image_change_notes_cache[cache_key] = []
-            return []
+    def get_image_changelog(self, image: str, previous_tag: str | None, target_tag: str) -> dict[str, Any]:
+        """What a Wodby image tag update changed, for release notes.
 
-        target_match = WODBY_TAG_RE.match(target_tag)
-        release_tag = target_match.group("release") if target_match else None
-        if release_tag is None:
-            self._image_change_notes_cache[cache_key] = []
-            return []
+        Entries come from the image's release notes for every revision in the update,
+        following base-image updates recursively. When none of them applies to this
+        version, the image contents are compared instead (`fallback`).
+        """
+        cache_key = (image, previous_tag, target_tag)
+        if cache_key in self._image_changelog_cache:
+            return copy.deepcopy(self._image_changelog_cache[cache_key])
+        result: dict[str, Any] = {"entries": [], "gaps": [], "fallback": None}
+        if not self.is_owner_image(image) or not previous_tag:
+            self._image_changelog_cache[cache_key] = result
+            return copy.deepcopy(result)
 
-        _registry, image_repo = self.image_repository(image)
+        registry, image_repo = self.image_repository(image)
         repo = image_repo.split("/", 1)[1]
+        changelog = WodbyImageChangelog(
+            self.wodby_release_message,
+            lambda base_repo, tag: self.get_github_tag_note(self.owner, base_repo, tag) is not None,
+            self.owner,
+        )
         try:
-            if release_tag.startswith("r"):
-                # Full-version revision counters can differ from the repository release.
-                alias = self.get_github_tag_note(self.owner, repo, target_tag)
-                match = IMAGE_RELEASE_ALIAS_RE.search(str((alias or {}).get("message") or ""))
-                if not match:
-                    raise ValueError(f"Image alias {target_tag} does not identify its repository release")
-                release_tag = match.group("release")
-            notes = [self.build_wodby_tag_note_tree(repo, release_tag, image_version)]
+            collected = changelog.collect(repo, previous_tag, target_tag)
+            result["entries"] = [asdict(entry) for entry in collected.entries]
+            result["gaps"] = collected.gaps
         except Exception as exc:
-            notes = [
-                {
-                    "repo": f"{self.owner}/{repo}",
-                    "tag": release_tag,
-                    "message": f"Image tag change notes lookup failed: {exc}",
-                    "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{release_tag}",
-                    "base_changes": [],
-                }
-            ]
-        self._image_change_notes_cache[cache_key] = copy.deepcopy(notes)
-        return notes
+            result["gaps"] = [f"release notes lookup failed: {exc}"]
+        if not result["entries"]:
+            try:
+                before = self.get_image_digest(image, previous_tag)
+                after = self.get_image_digest(image, target_tag)
+                facts = analyze_rebuild(self.get_image_registry(), image, registry, image_repo, target_tag, before, after)
+                result["fallback"] = {"lines": change_lines(facts), "error": facts.error}
+            except Exception as exc:
+                result["fallback"] = {"lines": [], "error": str(exc) or exc.__class__.__name__}
+        self._image_changelog_cache[cache_key] = copy.deepcopy(result)
+        return result
 
     def get_dockerhub_tags(self, repo: str) -> list[str]:
         cache_key = ("dockerhub", repo)
@@ -3615,6 +3662,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                     if published_tags is None:
                         continue
 
+                    # Final production tag per option, filled below; release notes name the options left behind.
+                    image_option_tags: dict[str, str] = {}
                     for option in options:
                         wanted = str(option.get("version"))
                         configured = option.get("tag") or wanted
@@ -3628,6 +3677,7 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                         else:
                             target = generator.latest_external_tag(wanted, published_tags, configured)
 
+                        image_option_tags[wanted] = target or configured
                         if target is None:
                             if paired:
                                 warnings.append(
@@ -3665,11 +3715,11 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                             "image_version": wanted,
                                             "service_label": label if multiple_manifests else "",
                                             "display_before": configured,
-                                            "image_change_notes": generator.get_image_change_notes(
+                                            "image_option_tags": image_option_tags,
+                                            "image_changelog": generator.get_image_changelog(
                                                 image,
                                                 str(raw_option.get("tag") or configured) if configured else None,
                                                 target,
-                                                wanted,
                                             ),
                                         },
                                     )
@@ -3732,6 +3782,8 @@ def generate_report(args: argparse.Namespace) -> dict[str, Any]:
                                             "change_type": "image_tag",
                                             "image": image,
                                             "image_version": wanted,
+                                            "image_option_tags": image_option_tags,
+                                            "development": True,
                                             "service_label": label if multiple_manifests else "",
                                         },
                                     )

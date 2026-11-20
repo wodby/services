@@ -43,7 +43,7 @@ def report(manifest, tags, digests, git_tags=None, rebuild_note="note"):
     generator.get_service_data = lambda *_: manifest
     generator.get_image_tags = lambda _: tags
     generator.get_github_tags = lambda _, repo: {"1.0.0"} if repo.startswith("service-") else set(git_tags or tags)
-    generator.get_image_change_notes = lambda *_: []
+    generator.get_image_changelog = lambda *_: {"entries": [], "gaps": [], "fallback": None}
     generator.get_image_digest = lambda image, tag: digests[f"{image}:{tag}"]
     rebuilds = []
     generator.describe_image_rebuild = lambda *args: rebuilds.append(args) or rebuild_note
@@ -80,7 +80,7 @@ class DigestPlanningTest(unittest.TestCase):
         self.assertEqual(digest_changes(item), [("digest", None, NEW, "pin")])
         self.assertEqual(rebuilds, [])
         description = item["planned_release"]["description"]
-        self.assertIn("phpmyadmin image pinned by digest for tag `5.2.3`", description)
+        self.assertIn("(phpmyadmin image pinned by digest)", description)
         self.assertNotIn("Image changes:", description)
 
     def test_a_current_pin_needs_no_release(self):
@@ -100,7 +100,7 @@ class DigestPlanningTest(unittest.TestCase):
         description = item["planned_release"]["description"]
         self.assertIn("Image changes:\n- `phpmyadmin:5.2.3` was rebuilt upstream on 19 Nov 2026.", description)
         self.assertIn("\n  - PHP 8.3.33 → 8.3.37", description)
-        self.assertIn("phpmyadmin image digest updated for rebuilt tag `5.2.3`", description)
+        self.assertIn("(phpmyadmin image digest updated to the rebuilt image)", description)
 
     def test_digest_follows_a_tag_update_without_a_rebuild_note(self):
         item, rebuilds = report(
@@ -310,9 +310,11 @@ class RebuildNoteTest(unittest.TestCase):
             "- Java (OpenJDK 21) 21.0.13.0.9 → 21.0.13.1.2",
         ]))
 
-    def test_few_unremarkable_packages_are_named(self):
+    def test_few_unremarkable_packages_are_listed_with_versions(self):
         facts = self.facts(packages=[("libopenexr", "3.2.12-1~deb13u1", "3.2.12-1~deb13u2"), ("linux", "6.12.115-2", "6.12.117-1")])
-        self.assertIn("- Updates to 2 Debian packages: libopenexr and linux", render_rebuild_note(facts, "Nextcloud"))
+        note = render_rebuild_note(facts, "Nextcloud")
+        self.assertIn("- libopenexr 3.2.12-1~deb13u1 → 3.2.12-1~deb13u2", note)
+        self.assertIn("- linux 6.12.115 → 6.12.117", note)
 
     def test_new_source_revision_and_failures(self):
         facts = self.facts(revision_after="b0c1d2e", runtimes=[("Node.js", "24.1.0", "24.1.1")])
