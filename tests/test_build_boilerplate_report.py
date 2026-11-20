@@ -10,9 +10,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from service_report_email import build_body, event_counts, repo_items  # noqa: E402
 from service_update_report import (  # noqa: E402
     UpdateReportGenerator,
+    release_note_changes,
     render_release_description,
     render_markdown,
-    render_tag_note_details,
     strip_ssh_signature_blocks,
 )
 from update_repository_readmes import (  # noqa: E402
@@ -311,75 +311,97 @@ Keep this repository-specific guidance.
         self.assertIn("Build Boilerplate Review", body)
         self.assertIn("new build boilerplate tag", body)
 
-    def test_parent_service_change_notes_include_ancestor_services(self) -> None:
+    def test_base_service_changes_cover_every_release_in_the_update(self) -> None:
         generator = FakeGenerator()
-        generator.tags[("wodby", "service-laravel-nginx")] = {"1.0.5", "1.0.6"}
-        for repo, tag, message in (
-            ("service-laravel-nginx", "1.0.6", "Laravel Nginx parent changes."),
-            ("service-php-nginx", "1.0.5", "PHP Nginx parent changes."),
-            ("service-nginx", "1.0.4", "Nginx image changes."),
-        ):
-            generator.tag_notes[("wodby", repo, tag)] = {
-                "repo": f"wodby/{repo}",
-                "tag": tag,
-                "message": message,
-                "url": f"https://github.com/wodby/{repo}/releases/tag/{tag}",
-                "base_changes": [],
+        generator.tags[("wodby", "service-php-nginx")] = {"1.0.4", "1.0.5", "1.0.6", "1.0.7", "2.0.0"}
+        notes = {
+            "1.0.5": "Release 1.0.5\n\n(wodby/nginx image pinned by digest)",
+            "1.0.6": """Release 1.0.6
+
+Base service changes:
+- nginx updates: 1.31.8 -> 1.31.9 (wodby/nginx r23)
+  - Fixes a request smuggling bug.
+
+(Base service `service-nginx` updated to `2.2.7`)""",
+            "1.0.7": "Keep upload limits in sync with PHP\n\nSome background.\n\n- The nginx limit now follows PHP_POST_MAX_SIZE.",
+            "2.0.0": "Release 2.0.0\n\nImage changes:\n- Outside the update",
+        }
+        for tag, message in notes.items():
+            generator.tag_notes[("wodby", "service-php-nginx", tag)] = {"message": message}
+
+        result = generator.check_parent_service_version("php-nginx", "^1.0.0", "1.0.4", "")
+
+        change = result["planned_changes"][0]
+        self.assertEqual(change["after"], "1.0.7")
+        self.assertEqual(change["base_change_blocks"], [
+            ["- nginx updates: 1.31.8 -> 1.31.9 (wodby/nginx r23)", "  - Fixes a request smuggling bug."],
+            ["- Keep upload limits in sync with PHP", "  - The nginx limit now follows PHP_POST_MAX_SIZE."],
+        ])
+        self.assertIn("updating base service `service-php-nginx` from `1.0.4` to `1.0.7`", result["updates"][0])
+
+    def test_older_release_notes_contribute_only_their_changes(self) -> None:
+        # Notes written before this format nest each base release under "- Release X" with tag lists.
+        message = """Release 2.2.5
+
+Parent service changes:
+- Release 2.2.5
+
+  Parent service changes:
+  - Release 2.2.6
+
+    (wodby/nginx image pinned by digest for tags `1.31-r24`, `1.30-r24`)
+
+  (Parent service `service-nginx` updated to `2.2.6`)
+- Release 2.2.6
+
+  Image changes:
+  - nginx updates: 1.31.8 -> 1.31.9
+
+(drupal11-nginx: Parent service `service-php-nginx` updated to `2.2.5`)"""
+        self.assertEqual(release_note_changes(message), [["- nginx updates: 1.31.8 -> 1.31.9"]])
+
+    def test_base_service_release_description(self) -> None:
+        image_entry = {"image": "wodby/php", "revision": "r17", "title": "Update PHP to 8.4.28",
+                       "bullets": [], "base_of": "wodby/drupal-php"}
+        planned_changes = [
+            {
+                "change_type": "image_tag",
+                "image": "wodby/drupal-php",
+                "image_version": "8.4",
+                "service_label": label,
+                "before": "8.4-r22",
+                "after": "8.4-r23",
+                "image_option_tags": {"8.4": "8.4-r23"},
+                "image_changelog": {"entries": [image_entry], "gaps": [], "fallback": None},
             }
-        generator.service_data_at_refs[("service-laravel-nginx", "1.0.6", "service.yml")] = {
-            "from": "php-nginx",
-            "fromVersion": "1.0.5",
-        }
-        generator.service_data_at_refs[("service-php-nginx", "1.0.5", "service.yml")] = {
-            "from": "nginx",
-            "fromVersion": "1.0.4",
-        }
-        generator.service_data_at_refs[("service-nginx", "1.0.4", "service.yml")] = {
-            "name": "nginx",
-        }
-
-        result = generator.check_parent_service_version(
-            "laravel-nginx",
-            "^1.0.0",
-            "1.0.5",
-            "",
-        )
-
-        note = result["planned_changes"][0]["parent_change_notes"][0]
-        self.assertEqual(note["repo"], "wodby/service-laravel-nginx")
-        parent_note = note["parent_changes"][0]
-        self.assertEqual(parent_note["repo"], "wodby/service-php-nginx")
-        self.assertEqual(parent_note["parent_changes"][0]["repo"], "wodby/service-nginx")
-
-        description = result["planned_changes"][0]["parent_change_notes"][0]
-        rendered = "\n".join(render_tag_note_details(description))
-        self.assertIn("Laravel Nginx parent changes.", rendered)
-        self.assertIn("PHP Nginx parent changes.", rendered)
-        self.assertIn("Nginx image changes.", rendered)
-
-    def test_parent_service_change_note_traversal_stops_on_cycle(self) -> None:
-        generator = FakeGenerator()
-        for repo in ("service-a", "service-b"):
-            generator.tag_notes[("wodby", repo, "1.0.0")] = {
-                "repo": f"wodby/{repo}",
-                "tag": "1.0.0",
-                "message": f"{repo} changes.",
-                "url": f"https://github.com/wodby/{repo}/releases/tag/1.0.0",
-                "base_changes": [],
+            for label in ("drupal11-php", "drupal10-php")
+        ] + [
+            {
+                "change_type": "parent_service_version",
+                "parent_repo": "service-php",
+                "service_label": label,
+                "after": "3.4.5",
+                "base_change_blocks": [
+                    ["- Update PHP to 8.4.28 (wodby/php r17)"],
+                    ["- Turn session upload progress off by default (wodby/php r18)"],
+                ],
             }
-        generator.service_data_at_refs[("service-a", "1.0.0", "service.yml")] = {
-            "from": "b",
-            "fromVersion": "1.0.0",
-        }
-        generator.service_data_at_refs[("service-b", "1.0.0", "service.yml")] = {
-            "from": "a",
-            "fromVersion": "1.0.0",
-        }
+            for label in ("drupal11-php", "drupal10-php")
+        ]
 
-        note = generator.build_service_tag_note_tree("service-a", "1.0.0")
+        description = render_release_description("service-drupal-php", "1.8.4", "1.8.5", planned_changes)
 
-        cycle_note = note["parent_changes"][0]["parent_changes"][0]
-        self.assertIn("inheritance cycle", cycle_note["message"])
+        self.assertEqual(description, """\
+Release 1.8.5
+
+Image changes:
+- Update PHP to 8.4.28 (wodby/php r17, base image of wodby/drupal-php)
+
+Base service changes:
+- Turn session upload progress off by default (wodby/php r18)
+
+(drupal11-php and drupal10-php: wodby/drupal-php image revision updated to r23)
+(drupal11-php and drupal10-php: Base service `service-php` updated to `3.4.5`)""")
 
     def test_service_release_leads_with_image_changes_and_deduplicates_tag_updates(self) -> None:
         entry = {

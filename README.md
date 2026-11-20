@@ -47,9 +47,14 @@ update. A note that only records a new base image, such as
 image's notes, recursively. Bullets and notes that name only other version lines
 (`Alpine 3.24` for an image on Alpine 3.23) or exclude the image are left out.
 When no note applies to a version, the notes compare the two images instead and
-list the version and package changes, or say there were none. Tag and digest
-updates follow as one short line per image, such as
-`(wodby/php image revision updated to r18 except 8.2)`.
+list the version and package changes, or say there were none.
+
+A service built on another one (`from`) lists, under **Base service changes**,
+the changes of every base service release it moves past, taken from those
+releases' notes, once each and without changes already listed for its images.
+Tag, digest, and base service version updates follow as one short line each,
+such as `(wodby/php image revision updated to r18 except 8.2)`; a line that
+several manifests share names them together.
 
 A new Helm chart major version isn't released automatically, because it can
 change the chart's values or resources. The updater keeps the service on the

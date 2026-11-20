@@ -389,9 +389,6 @@ EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)(?P<variant
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
 CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+(?:\.\d+)?)$")
-BASE_IMAGE_UPDATE_RE = re.compile(r"^Base image (?:stability|revision) tag updated to (?P<tag>\S+)", re.IGNORECASE)
-FROM_WODBY_IMAGE_RE = re.compile(r"^\s*FROM\s+wodby/(?P<repo>[A-Za-z0-9._-]+):", re.MULTILINE)
-README_BASE_IMAGE_RE = re.compile(r"Base image:\s+\[wodby/(?P<repo>[A-Za-z0-9._-]+)\]", re.IGNORECASE)
 SOURCE_VERSION_TAG_RE = re.compile(r"^[vV]?(?P<version>\d+(?:\.\d+)*)(?:p(?P<portable>\d+))?$")
 TAILSCALE_STABLE_OPTION_RE = re.compile(r'<option value="(?P<version>\d+\.\d+\.\d+)"')
 GITHUB_REPO_URL_RE = re.compile(
@@ -884,8 +881,8 @@ def render_maintenance_summaries(planned_changes: list[dict[str, Any]]) -> list[
             product_suffix = f" for {product}" if product else ""
             lines.append(f"{prefix}EOL{product_suffix} version `{version}` updated to `{after}`")
         elif change_type == "parent_service_version":
-            parent_repo = str(change.get("parent_repo") or "parent service")
-            lines.append(f"{prefix}Parent service `{parent_repo}` updated to `{after}`")
+            parent_repo = str(change.get("parent_repo") or "base service")
+            lines.append(f"{prefix}Base service `{parent_repo}` updated to `{after}`")
         else:
             field_path = str(change.get("path") or change.get("key") or "value")
             lines.append(f"{prefix}`{field_path}` updated to `{after}`")
@@ -956,17 +953,53 @@ def render_release_description(
         lines.append("")
         lines.append("Image changes:")
         lines.extend(image_note_blocks)
-    parent_note_blocks = render_parent_service_change_notes(planned_changes)
-    if parent_note_blocks:
+    shown = {change_block_identity(block) for block in split_change_blocks(image_note_blocks)}
+    base_note_blocks = render_base_service_change_notes(planned_changes, shown)
+    if base_note_blocks:
         lines.append("")
-        lines.append("Parent service changes:")
-        lines.extend(parent_note_blocks)
-    maintenance_summaries = render_maintenance_summaries(planned_changes)
+        lines.append("Base service changes:")
+        lines.extend(base_note_blocks)
+    maintenance_summaries = merge_manifest_lines(render_maintenance_summaries(planned_changes), planned_changes)
     if maintenance_summaries:
         lines.append("")
         for summary in maintenance_summaries:
             lines.append(f"({summary})")
     return "\n".join(lines)
+
+
+def split_change_blocks(lines: list[str]) -> list[list[str]]:
+    """Group rendered lines into top-level bullet blocks."""
+    blocks: list[list[str]] = []
+    for line in lines:
+        if line.startswith("- ") or not blocks:
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+    return blocks
+
+
+def merge_manifest_lines(lines: list[str], planned_changes: list[dict[str, Any]]) -> list[str]:
+    """Write a line that several manifests share once, naming them together."""
+    labels = sorted(
+        {str(change.get("service_label") or "").strip() for change in planned_changes} - {""},
+        key=len,
+        reverse=True,
+    )
+    merged: dict[str, list[str]] = {}
+    for line in lines:
+        label = next((label for label in labels if line.startswith(f"{label}: ")), "")
+        text = line[len(label) + 2:] if label else line
+        holders = merged.setdefault(text, [])
+        if label not in holders:
+            holders.append(label)
+    result: list[str] = []
+    for text, holders in merged.items():
+        named = [holder for holder in holders if holder]
+        if "" in holders or not named:
+            result.append(text)
+        else:
+            result.append(f"{join_words(named)}: {text}")
+    return result
 
 
 def render_helm_chart_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
@@ -991,77 +1024,9 @@ def render_helm_chart_change_notes(planned_changes: list[dict[str, Any]]) -> lis
     return lines
 
 
-def render_tag_note(note: dict[str, Any], indent: int = 0) -> list[str]:
-    prefix = "  " * indent
-    repo = note.get("repo") or "unknown repo"
-    tag = note.get("tag") or "unknown tag"
-    lines = [f"{prefix}- {repo}:{tag}"]
-    lines.extend(render_tag_note_details(note, indent + 1))
-    return lines
-
-
 def strip_ssh_signature_blocks(message: str) -> str:
     """Remove raw SSH signatures that GitHub includes in annotated tag messages."""
     return SSH_SIGNATURE_BLOCK_RE.sub("", message).strip()
-
-
-def render_tag_note_details(note: dict[str, Any], indent: int = 0) -> list[str]:
-    prefix = "  " * indent
-    lines: list[str] = []
-    message = strip_ssh_signature_blocks(str(note.get("message") or note.get("reason") or ""))
-    if message:
-        for message_line in message.splitlines():
-            lines.append(f"{prefix}{message_line}")
-    for child in note.get("base_changes") or []:
-        lines.extend(render_tag_note(child, indent))
-    parent_changes = note.get("parent_changes") or []
-    if parent_changes:
-        lines.append(f"{prefix}Parent service changes:")
-        for child in parent_changes:
-            lines.extend(render_tag_note(child, indent + 1))
-    return lines
-
-
-def customer_change_messages(note: dict[str, Any]) -> list[str]:
-    """Flatten nested tag notes to the release messages customers care about."""
-    messages: list[str] = []
-    message = strip_ssh_signature_blocks(str(note.get("message") or note.get("reason") or ""))
-    ignored_prefixes = (
-        "Base image stability tag updated to ",
-        "Base image revision tag updated to ",
-        "Base image repo could not be resolved ",
-        "Image tag change notes lookup failed:",
-        "Parent service tag description lookup failed:",
-        "Tag description was not found.",
-        "Tag is lightweight; no tag description was found.",
-        "Tag note traversal stopped ",
-        "Parent service traversal stopped ",
-    )
-    if message and not message.startswith(ignored_prefixes):
-        messages.append(message)
-    for child in note.get("base_changes") or []:
-        messages.extend(customer_change_messages(child))
-    for child in note.get("parent_changes") or []:
-        messages.extend(customer_change_messages(child))
-    return messages
-
-
-def render_customer_change_notes(notes: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    seen: set[str] = set()
-    for note in notes:
-        for message in customer_change_messages(note):
-            if message in seen:
-                continue
-            seen.add(message)
-            message_lines = message.splitlines()
-            first_line = message_lines[0].strip()
-            if first_line.startswith(("- ", "* ")):
-                first_line = first_line[2:].strip()
-            lines.append(f"- {first_line}")
-            for message_line in message_lines[1:]:
-                lines.append(f"  {message_line}" if message_line else "")
-    return lines
 
 
 def render_image_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
@@ -1121,30 +1086,75 @@ def render_image_rebuild_notes(planned_changes: list[dict[str, Any]]) -> list[st
     return lines
 
 
-def render_parent_service_change_notes(planned_changes: list[dict[str, Any]]) -> list[str]:
-    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+def render_base_service_change_notes(planned_changes: list[dict[str, Any]], shown: set[str]) -> list[str]:
+    """Changes inherited from base service releases, once each, skipping those already shown."""
+    lines: list[str] = []
     for change in planned_changes:
         if change.get("change_type") != "parent_service_version":
             continue
-        parent_repo = str(change.get("parent_repo") or "unknown parent")
-        parent_tag = str(change.get("parent_tag") or str(change.get("after") or "").lstrip("^"))
-        notes = change.get("parent_change_notes") or []
-        note = notes[0] if notes else None
-        group_key = (
-            str(note.get("repo") or parent_repo) if note else parent_repo,
-            str(note.get("tag") or parent_tag) if note else parent_tag,
-        )
-        grouped.setdefault(
-            group_key,
-            {
-                "repo": group_key[0],
-                "tag": group_key[1],
-                "note": note,
-            },
-        )
+        for block in change.get("base_change_blocks") or []:
+            identity = change_block_identity(block)
+            if identity in shown:
+                continue
+            shown.add(identity)
+            lines.extend(block)
+    return lines
 
-    notes = [group["note"] for group in grouped.values() if group.get("note")]
-    return render_customer_change_notes(notes)
+
+RELEASE_TITLE_RE = re.compile(r"^Release v?\d+\.\d+\.\d+$")
+RELEASE_WRAPPER_RE = re.compile(r"^- Release v?\d+\.\d+\.\d+$")
+CHANGE_SOURCE_SUFFIX_RE = re.compile(r" \((?:wodby/[a-z0-9_.-]+ r\d+)(?:, base image of [^)]*)?\)$")
+
+
+def release_note_changes(message: str) -> list[list[str]]:
+    """Split a service release note into its customer-facing change blocks.
+
+    A block is a top-level bullet with its nested lines. Release titles, section
+    headings, and the parenthesized tag, digest, and version lines are dropped, and
+    bullets nested under older `- Release X` wrappers are lifted to the top level.
+    A hand-written release whose first line is not `Release X` becomes one block:
+    its title with its bullets.
+    """
+    lines = [line.rstrip() for line in strip_ssh_signature_blocks(message).splitlines()]
+    content = [line for line in lines if line.strip()]
+    if not content:
+        return []
+    title = content[0].strip()
+    if not RELEASE_TITLE_RE.match(title):
+        if title.startswith("("):
+            return []
+        bullets = [f"  {line.strip()}" for line in content[1:] if line.strip().startswith(("- ", "* "))]
+        return [[f"- {title}"] + bullets]
+
+    blocks: list[list[str]] = []
+    block: list[str] | None = None
+    block_indent = 0
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        indent = len(line) - len(line.lstrip())
+        maintenance = stripped.startswith("(") and stripped.endswith(")")
+        heading = stripped.endswith(":") and not stripped.startswith(("- ", "* "))
+        if block is not None and indent > block_indent:
+            if not maintenance and not heading:
+                block.append(line[block_indent:])
+            continue
+        block = None
+        if maintenance or heading or RELEASE_WRAPPER_RE.match(stripped) or not stripped.startswith(("- ", "* ")):
+            continue
+        block = [stripped]
+        block_indent = indent
+        blocks.append(block)
+    return blocks
+
+
+def change_block_identity(block: list[str]) -> str:
+    """Compare change blocks without the image source suffix, so a change reached two ways is listed once."""
+    if not block:
+        return ""
+    first = CHANGE_SOURCE_SUFFIX_RE.sub("", block[0])
+    return "\n".join([first] + [line.strip() for line in block[1:]])
 
 
 def build_planned_release(repo: str, tags: set[str], planned_changes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1281,8 +1291,6 @@ class UpdateReportGenerator:
         self._github_ref_cache: dict[tuple[str, str, str], bool] = {}
         self._github_tags_cache: dict[tuple[str, str], set[str]] = {}
         self._github_tag_note_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
-        self._ref_file_cache: dict[tuple[str, str, str], str | None] = {}
-        self._base_image_repo_cache: dict[tuple[str, str, str | None], str | None] = {}
         self._image_changelog_cache: dict[tuple[str, str | None, str], dict[str, Any]] = {}
         self._registry_tags_cache: dict[tuple[str, str], list[str]] = {}
         self._oci_chart_metadata_cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1292,7 +1300,6 @@ class UpdateReportGenerator:
         self._http_cache: dict[tuple[str, tuple[tuple[str, str], ...]], requests.Response] = {}
         self._helm_index_cache: dict[str, dict[str, Any]] = {}
         self._service_data_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
-        self._service_data_at_ref_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
         self._wodby_chart_metadata_cache: dict[str, dict[str, Any]] = {}
         self._wodby_chart_values_cache: dict[str, dict[str, Any]] = {}
         self._eol_product_index_cache: dict[str, str] | None = None
@@ -1422,28 +1429,6 @@ class UpdateReportGenerator:
             raise RuntimeError(f"{repo} {manifest_path} did not decode to a mapping")
 
         self._service_data_cache[cache_key] = service_data
-        return service_data
-
-    def get_service_data_at_ref(
-        self,
-        repo: str,
-        ref: str,
-        manifest_path: str = "service.yml",
-    ) -> dict[str, Any] | None:
-        cache_key = (repo, ref, manifest_path)
-        if cache_key in self._service_data_at_ref_cache:
-            return self._service_data_at_ref_cache[cache_key]
-
-        service_text = self.get_repo_file_at_ref(repo, ref, manifest_path)
-        if service_text is None:
-            self._service_data_at_ref_cache[cache_key] = None
-            return None
-
-        service_data = yaml.safe_load(service_text) or {}
-        if not isinstance(service_data, dict):
-            raise RuntimeError(f"{repo} {manifest_path} at {ref} did not decode to a mapping")
-
-        self._service_data_at_ref_cache[cache_key] = service_data
         return service_data
 
     def get_repo_manifest_paths(self, repo: str) -> list[str]:
@@ -1792,12 +1777,12 @@ class UpdateReportGenerator:
         current_version = str(from_version or "").strip()
         if not current_constraint:
             result["warnings"].append(
-                f"{prefix}parent service `{parent_repo}` is set via `from`, but `fromVersionConstraint` is missing"
+                f"{prefix}base service `{parent_repo}` is set via `from`, but `fromVersionConstraint` is missing"
             )
             return result
         if not current_version:
             result["warnings"].append(
-                f"{prefix}parent service `{parent_repo}` is set via `from`, but exact `fromVersion` is missing"
+                f"{prefix}base service `{parent_repo}` is set via `from`, but exact `fromVersion` is missing"
             )
             return result
 
@@ -1835,7 +1820,7 @@ class UpdateReportGenerator:
             overall_version, overall_tag, _overall_prefix = overall_latest[0]
             if overall_version >= caret_upper_bound(base_version):
                 message = (
-                    f"{prefix}new major parent service `{parent_repo}` tag `{overall_tag}` is available "
+                    f"{prefix}new major base service `{parent_repo}` tag `{overall_tag}` is available "
                     f"outside `fromVersionConstraint` `{current_constraint}`; manual review required"
                 )
                 result["major_updates"].append(message)
@@ -1843,27 +1828,20 @@ class UpdateReportGenerator:
 
         if current_version == latest_tag:
             result["current"].append(
-                f"{prefix}parent service `{parent_repo}` latest compatible tag is current "
+                f"{prefix}base service `{parent_repo}` latest compatible tag is current "
                 f"(`{current_version}`, constraint: `{current_constraint}`)"
             )
             return result
 
         message = (
-            f"{prefix}updating parent service `{parent_repo}` from `{current_version}` to `{latest_tag}` "
+            f"{prefix}updating base service `{parent_repo}` from `{current_version}` to `{latest_tag}` "
             f"(constraint: `{current_constraint}`)"
         )
         try:
-            parent_change_notes = [self.build_service_tag_note_tree(parent_repo, latest_tag)]
+            base_change_blocks = self.get_base_service_changes(parent_repo, current_version, latest_tag)
         except Exception as exc:
-            parent_change_notes = [
-                {
-                    "repo": f"{self.owner}/{parent_repo}",
-                    "tag": latest_tag,
-                    "message": f"Parent service tag description lookup failed: {exc}",
-                    "url": f"https://github.com/{self.owner}/{parent_repo}/releases/tag/{latest_tag}",
-                    "base_changes": [],
-                }
-            ]
+            base_change_blocks = []
+            result["warnings"].append(f"{prefix}base service `{parent_repo}` release notes lookup failed: {exc}")
         result["updates"].append(message)
         result["planned_changes"].append(
             make_planned_change(
@@ -1878,12 +1856,40 @@ class UpdateReportGenerator:
                     "parent_repo": parent_repo,
                     "parent_tag": latest_tag,
                     "from_version_constraint": current_constraint,
-                    "parent_change_notes": parent_change_notes,
+                    "base_change_blocks": base_change_blocks,
                     "service_label": prefix.strip("[] ") if prefix else "",
                 },
             )
         )
         return result
+
+    def get_base_service_changes(self, repo: str, current_tag: str, target_tag: str) -> list[list[str]]:
+        """Customer-facing change blocks of every base service release after `current_tag` up to `target_tag`.
+
+        A base release's notes already carry its own base service's changes, so the
+        range is read once, without following the chain further.
+        """
+        current, target = parse_version(current_tag), parse_version(target_tag)
+        if current is None or target is None:
+            return []
+        releases = sorted(
+            (version, tag)
+            for tag in self.get_github_tags(self.owner, repo)
+            if SEMVER_TAG_RE.match(tag)
+            and (version := parse_version(tag)) is not None
+            and not version.is_prerelease
+            and current < version <= target
+        )
+        blocks: list[list[str]] = []
+        seen: set[str] = set()
+        for _version, tag in releases:
+            note = self.get_github_tag_note(self.owner, repo, tag)
+            for block in release_note_changes(str((note or {}).get("message") or "")):
+                identity = change_block_identity(block)
+                if identity not in seen:
+                    seen.add(identity)
+                    blocks.append(block)
+        return blocks
 
     def get_github_tag_note(self, owner: str, repo: str, tag: str) -> dict[str, Any] | None:
         cache_key = (owner, repo, tag)
@@ -1920,151 +1926,6 @@ class UpdateReportGenerator:
             note["message"] = "Tag is lightweight; no tag description was found."
 
         self._github_tag_note_cache[cache_key] = note
-        return note
-
-    def get_repo_file_at_ref(self, repo: str, ref: str, path: str) -> str | None:
-        cache_key = (repo, ref, path)
-        if cache_key in self._ref_file_cache:
-            return self._ref_file_cache[cache_key]
-
-        url = f"https://raw.githubusercontent.com/{self.owner}/{repo}/{quote(ref, safe='')}/{path}"
-        response = self.session.get(url, timeout=60)
-        if response.status_code == 404:
-            self._ref_file_cache[cache_key] = None
-            return None
-        response.raise_for_status()
-        self._ref_file_cache[cache_key] = response.text
-        return response.text
-
-    def find_base_image_repo(self, repo: str, tag: str, image_version: str | None) -> str | None:
-        cache_key = (repo, tag, image_version)
-        if cache_key in self._base_image_repo_cache:
-            return self._base_image_repo_cache[cache_key]
-
-        dockerfile_paths = ["Dockerfile"]
-        if image_version:
-            image_major = image_version.split(".", 1)[0]
-            dockerfile_paths.extend([f"{image_version}/Dockerfile", f"{image_major}/Dockerfile"])
-
-        for path in dockerfile_paths:
-            dockerfile = self.get_repo_file_at_ref(repo, tag, path)
-            if not dockerfile:
-                continue
-            match = FROM_WODBY_IMAGE_RE.search(dockerfile)
-            if match:
-                base_repo = match.group("repo")
-                self._base_image_repo_cache[cache_key] = base_repo
-                return base_repo
-
-        readme = self.get_repo_file_at_ref(repo, tag, "README.md")
-        if readme:
-            match = README_BASE_IMAGE_RE.search(readme)
-            if match:
-                base_repo = match.group("repo")
-                self._base_image_repo_cache[cache_key] = base_repo
-                return base_repo
-
-        self._base_image_repo_cache[cache_key] = None
-        return None
-
-    def build_wodby_tag_note_tree(
-        self,
-        repo: str,
-        tag: str,
-        image_version: str | None,
-        *,
-        depth: int = 0,
-        seen: frozenset[tuple[str, str]] = frozenset(),
-    ) -> dict[str, Any]:
-        key = (repo, tag)
-        if key in seen:
-            return {
-                "repo": f"{self.owner}/{repo}",
-                "tag": tag,
-                "message": "Tag note traversal stopped because a base-image cycle was detected.",
-                "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{tag}",
-                "base_changes": [],
-            }
-
-        note = self.get_github_tag_note(self.owner, repo, tag)
-        if note is None:
-            return {
-                "repo": f"{self.owner}/{repo}",
-                "tag": tag,
-                "message": "Tag description was not found.",
-                "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{tag}",
-                "base_changes": [],
-            }
-
-        note = copy.deepcopy(note)
-        if depth >= 4:
-            return note
-
-        message = str(note.get("message") or "").strip()
-        match = BASE_IMAGE_UPDATE_RE.match(message)
-        if not match:
-            return note
-
-        base_repo = self.find_base_image_repo(repo, tag, image_version)
-        if base_repo is None:
-            note["base_changes"] = [
-                {
-                    "repo": "unknown base image",
-                    "tag": match.group("tag"),
-                    "message": f"Base image repo could not be resolved for wodby/{repo}:{tag}.",
-                    "url": "",
-                    "base_changes": [],
-                }
-            ]
-            return note
-
-        note["base_changes"] = [
-            self.build_wodby_tag_note_tree(
-                base_repo,
-                match.group("tag"),
-                None,
-                depth=depth + 1,
-                seen=seen | {key},
-            )
-        ]
-        return note
-
-    def build_service_tag_note_tree(
-        self,
-        repo: str,
-        tag: str,
-        *,
-        seen: frozenset[tuple[str, str]] = frozenset(),
-    ) -> dict[str, Any]:
-        key = (repo, tag)
-        if key in seen:
-            return {
-                "repo": f"{self.owner}/{repo}",
-                "tag": tag,
-                "message": "Parent service traversal stopped because an inheritance cycle was detected.",
-                "url": f"https://github.com/{self.owner}/{repo}/releases/tag/{tag}",
-                "base_changes": [],
-                "parent_changes": [],
-            }
-
-        note = self.build_wodby_tag_note_tree(repo, tag, None)
-        service_data = self.get_service_data_at_ref(repo, tag)
-        if service_data is None:
-            return note
-
-        parent_name = str(service_data.get("from") or "").strip()
-        parent_tag = str(service_data.get("fromVersion") or "").strip()
-        if not parent_name or not parent_tag:
-            return note
-
-        parent_repo = self.service_name_to_repo(parent_name)
-        note["parent_changes"] = [
-            self.build_service_tag_note_tree(
-                parent_repo,
-                parent_tag,
-                seen=seen | {key},
-            )
-        ]
         return note
 
     def wodby_release_message(self, repo: str, tag: str) -> str | None:
