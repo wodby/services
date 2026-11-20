@@ -24,6 +24,8 @@ from service_update_report import (
 
 
 OPTION_PATH_RE = re.compile(r"^options\[version=(?P<version>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
+# New digest fields are placed after the tag they pin.
+OPTION_DIGEST_ANCHORS = {"digest": "tag", "devDigest": "devTag"}
 CONTAINER_IMAGE_PATH_RE = re.compile(
     r"^workloads\[name=(?P<workload>[A-Za-z0-9_-]+)]"
     r"\.containers\[name=(?P<container>[A-Za-z0-9_-]+)]\.image$"
@@ -31,6 +33,8 @@ CONTAINER_IMAGE_PATH_RE = re.compile(
 CRD_CHART_PATH_RE = re.compile(r"^helm\.crdCharts\[name=(?P<name>.+)]\.(?P<field>[A-Za-z0-9_-]+)$")
 YAML_RT = YAML()
 YAML_RT.preserve_quotes = True
+# Digests are longer than the default 80-column width; never fold scalars onto a new line.
+YAML_RT.width = 4096
 
 
 def parse_args() -> argparse.Namespace:
@@ -252,6 +256,11 @@ def set_yaml_value(data: dict[str, Any], change: dict[str, Any]) -> None:
             raise RuntimeError(
                 f"{path} changed since report generation: expected {expected_before}, found {current}"
             )
+        anchor = OPTION_DIGEST_ANCHORS.get(key)
+        if key not in option and anchor in option and hasattr(option, "insert"):
+            # Keep a new digest next to the tag it pins.
+            option.insert(list(option.keys()).index(anchor) + 1, key, after)
+            return
         option[key] = replacement_value(current, after)
         return
 
@@ -444,10 +453,27 @@ def validate_planned_image_tags(
         for change in planned_changes
         if isinstance(change, dict) and change.get("change_type") in ("image_tag", "container_image")
     ]
-    if not image_changes:
+    digest_changes = [
+        change
+        for change in planned_changes
+        if isinstance(change, dict) and change.get("change_type") == "image_digest"
+    ]
+    if not image_changes and not digest_changes:
         return
 
     tag_source = generator or UpdateReportGenerator(owner)
+    # A tag can move again between the report and the release; never pin a build the tag no longer selects.
+    for change in digest_changes:
+        image = normalize(change.get("image"))
+        tag = normalize(change.get("image_tag"))
+        digest = normalize(change.get("after"))
+        if not image or not tag or not digest:
+            raise RuntimeError("planned image digest change must include image, tag and digest")
+        current = tag_source.get_image_digest(image, tag)
+        if current != digest:
+            raise RuntimeError(
+                f"`{image}:{tag}` now points to `{current}`, not the planned `{digest}`; rerun the report"
+            )
     for change in image_changes:
         image = normalize(change.get("image"))
         tag = normalize(

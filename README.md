@@ -23,6 +23,17 @@ selects a published image revision. The updater preserves variants such as
 PostGIS and checks that revision tags exist in both the image registry and Git.
 Service releases and Helm chart versions continue to use semantic versions.
 
+Each option also pins its image with `digest`, the multi-platform index digest
+of the image its tag selects (and `devDigest` for `devTag`). Deployments use
+`repository:tag@digest`, so clusters run exactly the pinned build. The updater
+pins unpinned options and keeps digests in step with tag updates. When a
+third-party tag starts pointing to a new build, the updater releases a patch
+whose notes describe the rebuild: version variables from the image
+configuration and the operating system packages that changed. Wodby revision
+tags are never rebuilt, so a new digest for one is reported for review instead.
+Options whose tag selects more than one image, such as a service whose
+containers share the option tag, are not pinned.
+
 The Service Update workflow checks service repositories daily and after each
 push to `master`, then emails a report of available updates. It releases
 planned updates only when the `SERVICE_AUTO_RELEASE` repository variable is
