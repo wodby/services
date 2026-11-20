@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -53,6 +54,18 @@ class DiscoveryWorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'missing from the update catalog: service-new'):
             self.discover('', extra_public_repo='service-new')
 
+
+    def test_report_module_imports_from_repository_root_in_fresh_interpreter(self):
+        # Other tests put scripts/ on sys.path, which hides import errors that
+        # only show up when the workflow imports the module as a package.
+        result = subprocess.run(
+            [sys.executable, '-c', 'from scripts.service_update_report import UpdateReportGenerator'],
+            cwd=ROOT,
+            env={key: value for key, value in os.environ.items() if key != 'PYTHONPATH'},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 if __name__ == '__main__':
     unittest.main()

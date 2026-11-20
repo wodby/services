@@ -23,7 +23,14 @@ from packaging.version import InvalidVersion, Version
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from image_digests import ImageRegistry, analyze_rebuild, render_rebuild_note
+# The workflow runs this file as a script (scripts/ on the path) and also imports
+# it as scripts.service_update_report from the repository root.
+try:
+    from image_digests import ImageRegistry, analyze_rebuild, render_rebuild_note
+except ModuleNotFoundError as error:
+    if error.name != "image_digests":
+        raise
+    from scripts.image_digests import ImageRegistry, analyze_rebuild, render_rebuild_note
 
 
 README_SERVICE_REPO_RE_TEMPLATE = r"https://github\.com/{owner}/(?P<repo>service-[A-Za-z0-9._-]+)(?:/)?(?=[)\s|]|$)"
