@@ -25,6 +25,31 @@ class ExternalImageVariantsTest(unittest.TestCase):
     def test_unknown_tag_formats_do_not_select_an_unrelated_variant(self):
         self.assertIsNone(self.generator.latest_external_tag('1', ['1.2.0'], 'alpine-v1.1.0'))
 
+    def test_release_timestamp_tags_advance_within_their_variant(self):
+        tags = [
+            'RELEASE.2026-11-12T00-00-00Z',
+            'RELEASE.2026-12-01T00-00-00Z',
+            'RELEASE.2027-01-05T00-00-00Z-distroless',
+            'RELEASE.2026-12-20T00-00-00Z-arm64',
+            'latest',
+        ]
+        self.assertEqual(
+            self.generator.latest_external_tag('2026', tags, 'RELEASE.2026-11-12T00-00-00Z'),
+            'RELEASE.2026-12-01T00-00-00Z',
+        )
+        self.assertEqual(
+            self.generator.latest_external_tag('2026', tags, 'RELEASE.2026-11-12T00-00-00Z-distroless'),
+            'RELEASE.2027-01-05T00-00-00Z-distroless',
+        )
+
+    def test_release_timestamp_tags_never_roll_back(self):
+        self.assertEqual(
+            self.generator.latest_external_tag(
+                '2026', ['RELEASE.2026-10-01T00-00-00Z'], 'RELEASE.2026-11-12T00-00-00Z'
+            ),
+            'RELEASE.2026-11-12T00-00-00Z',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
