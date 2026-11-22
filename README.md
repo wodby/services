@@ -169,6 +169,8 @@ Before publishing a service for others to use, review:
 | Zammad | [wodby/service-zammad](https://github.com/wodby/service-zammad) |
 | Mattermost | [wodby/service-mattermost](https://github.com/wodby/service-mattermost) |
 | eLabFTW | [wodby/service-elabftw](https://github.com/wodby/service-elabftw) |
+| SENAITE LIMS | [wodby/service-senaite](https://github.com/wodby/service-senaite) |
+| SENAITE database (ZEO) | [wodby/service-senaite-zeo](https://github.com/wodby/service-senaite-zeo) |
 | Metabase | [wodby/service-metabase](https://github.com/wodby/service-metabase) |
 | n8n | [wodby/service-n8n](https://github.com/wodby/service-n8n) |
 | Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
