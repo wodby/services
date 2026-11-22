@@ -144,6 +144,7 @@ Before publishing a service for others to use, review:
 | Ruby | [wodby/service-ruby](https://github.com/wodby/service-ruby) |
 | Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
 | Redmine | [wodby/service-redmine](https://github.com/wodby/service-redmine) |
+| Plane | [wodby/service-plane](https://github.com/wodby/service-plane) |
 | Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
 | Discourse (buildable) | [wodby/service-discourse-buildable](https://github.com/wodby/service-discourse-buildable) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
@@ -306,6 +307,7 @@ user-created application stacks.
 | Service | Repository |
 | --- | --- |
 | NFS Provisioner | [wodby/service-nfs-provisioner](https://github.com/wodby/service-nfs-provisioner) |
+| Silo (S3-compatible storage) | [wodby/service-silo](https://github.com/wodby/service-silo) |
 
 ### AI
 
