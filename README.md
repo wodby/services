@@ -172,6 +172,8 @@ Before publishing a service for others to use, review:
 | eLabFTW | [wodby/service-elabftw](https://github.com/wodby/service-elabftw) |
 | SENAITE LIMS | [wodby/service-senaite](https://github.com/wodby/service-senaite) |
 | SENAITE database (ZEO) | [wodby/service-senaite-zeo](https://github.com/wodby/service-senaite-zeo) |
+| openBIS | [wodby/service-openbis](https://github.com/wodby/service-openbis) |
+| Nginx (openBIS) | [wodby/service-openbis-nginx](https://github.com/wodby/service-openbis-nginx) |
 | Metabase | [wodby/service-metabase](https://github.com/wodby/service-metabase) |
 | n8n | [wodby/service-n8n](https://github.com/wodby/service-n8n) |
 | Slack Inviter | [wodby/service-slack-inviter](https://github.com/wodby/service-slack-inviter) |
