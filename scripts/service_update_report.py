@@ -386,6 +386,11 @@ WODBY_TAG_RE = re.compile(
     r"-(?P<release>r(?:0|[1-9]\d*)|\d+(?:\.\d+)*)$"
 )
 EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)(?P<variant>-[A-Za-z0-9._-]+)?$")
+# MinIO-style release tags, such as Silo's RELEASE.2026-11-12T00-00-00Z: one continuous release line ordered by
+# timestamp, with optional variants such as -distroless or -arm64.
+RELEASE_TIMESTAMP_TAG_RE = re.compile(
+    r"^RELEASE\.(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?P<variant>-[A-Za-z0-9._-]+)?$"
+)
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
 CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+(?:\.\d+)?)$")
@@ -2989,6 +2994,9 @@ class UpdateReportGenerator:
 
     def latest_external_tag(self, wanted: str, published_tags: list[str], configured: str | None) -> str | None:
         """Advance an external image without changing its configured variant or rolling back."""
+        release = RELEASE_TIMESTAMP_TAG_RE.fullmatch(configured or "")
+        if release:
+            return self.latest_release_timestamp_tag(published_tags, release)
         candidates: list[tuple[Version | None, int, str]] = []
         current = EXTERNAL_TAG_RE.fullmatch(configured or "")
         if configured and current is None:
@@ -3020,6 +3028,20 @@ class UpdateReportGenerator:
         else:
             tied.sort(key=lambda item: (item[1], item[2]), reverse=True)
         return tied[0][2]
+
+    @staticmethod
+    def latest_release_timestamp_tag(published_tags: list[str], current: re.Match[str]) -> str | None:
+        """The newest RELEASE.<timestamp> tag with the configured variant. These tags form one release line, so
+        the option version does not narrow them; the timestamp never moves back."""
+        variant = current.group("variant")
+        newest = current.group("stamp")
+        target = current.group(0)
+        for tag in published_tags:
+            match = RELEASE_TIMESTAMP_TAG_RE.fullmatch(tag)
+            # The fixed-width timestamp sorts as text.
+            if match and match.group("variant") == variant and match.group("stamp") > newest:
+                newest, target = match.group("stamp"), tag
+        return target
 
     def get_eol_product_index(self) -> dict[str, str]:
         if self._eol_product_index_cache is not None:
