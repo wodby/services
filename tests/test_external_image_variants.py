@@ -51,5 +51,16 @@ class ExternalImageVariantsTest(unittest.TestCase):
         )
 
 
+    def test_stable_build_tags_advance_by_build_then_rebuild(self):
+        tags = ['stable', 'stable-11248-3', 'stable-11509', 'stable-11509-1', 'stable-11509-2', 'jvb-2.3-297-1', 'unstable']
+        self.assertEqual(self.generator.latest_external_tag('2', tags, 'stable-11509-1'), 'stable-11509-2')
+        self.assertEqual(self.generator.latest_external_tag('2', tags + ['stable-11600'], 'stable-11509-1'), 'stable-11600')
+
+    def test_stable_build_tags_never_roll_back(self):
+        self.assertEqual(
+            self.generator.latest_external_tag('2', ['stable-11248-3', 'stable-11509'], 'stable-11509-1'),
+            'stable-11509-1',
+        )
+
 if __name__ == '__main__':
     unittest.main()

@@ -391,6 +391,9 @@ EXTERNAL_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<base>\d+(?:\.\d+)*)(?P<variant
 RELEASE_TIMESTAMP_TAG_RE = re.compile(
     r"^RELEASE\.(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)(?P<variant>-[A-Za-z0-9._-]+)?$"
 )
+# Jitsi-style stable build tags, such as stable-11509 and its rebuild stable-11509-1: one release line ordered by
+# build number, then rebuild number.
+STABLE_BUILD_TAG_RE = re.compile(r"^stable-(?P<build>\d+)(?:-(?P<rebuild>\d+))?$")
 ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SEMVER_TAG_RE = re.compile(r"^(?P<prefix>v?)(?P<version>\d+\.\d+\.\d+)$")
 CARET_CONSTRAINT_RE = re.compile(r"^\^(?P<version>v?\d+\.\d+(?:\.\d+)?)$")
@@ -2997,6 +3000,9 @@ class UpdateReportGenerator:
         release = RELEASE_TIMESTAMP_TAG_RE.fullmatch(configured or "")
         if release:
             return self.latest_release_timestamp_tag(published_tags, release)
+        stable = STABLE_BUILD_TAG_RE.fullmatch(configured or "")
+        if stable:
+            return self.latest_stable_build_tag(published_tags, stable)
         candidates: list[tuple[Version | None, int, str]] = []
         current = EXTERNAL_TAG_RE.fullmatch(configured or "")
         if configured and current is None:
@@ -3028,6 +3034,21 @@ class UpdateReportGenerator:
         else:
             tied.sort(key=lambda item: (item[1], item[2]), reverse=True)
         return tied[0][2]
+
+    @staticmethod
+    def latest_stable_build_tag(published_tags: list[str], current: re.Match[str]) -> str | None:
+        """The newest stable-<build>[-<rebuild>] tag. These tags form one release line, so the option version does not
+        narrow them; the build and rebuild numbers never move back."""
+
+        def key(match: re.Match[str]) -> tuple[int, int]:
+            return int(match.group("build")), int(match.group("rebuild") or 0)
+
+        newest, target = key(current), current.group(0)
+        for tag in published_tags:
+            match = STABLE_BUILD_TAG_RE.fullmatch(tag)
+            if match and key(match) > newest:
+                newest, target = key(match), tag
+        return target
 
     @staticmethod
     def latest_release_timestamp_tag(published_tags: list[str], current: re.Match[str]) -> str | None:
