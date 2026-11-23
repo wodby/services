@@ -145,6 +145,7 @@ Before publishing a service for others to use, review:
 | Rails | [wodby/service-rails](https://github.com/wodby/service-rails) |
 | Redmine | [wodby/service-redmine](https://github.com/wodby/service-redmine) |
 | Plane | [wodby/service-plane](https://github.com/wodby/service-plane) |
+| Jitsi Meet | [wodby/service-jitsi](https://github.com/wodby/service-jitsi) |
 | Discourse | [wodby/service-discourse](https://github.com/wodby/service-discourse) |
 | Discourse (buildable) | [wodby/service-discourse-buildable](https://github.com/wodby/service-discourse-buildable) |
 | Go | [wodby/service-go](https://github.com/wodby/service-go) |
